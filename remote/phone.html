@@ -58,6 +58,11 @@ const POSE = (() => { const r = qs.get("pose"); if (!r) return null;
 // live compass heading (helmet/worn phone): ?heading=1 -> send live yaw in every message
 const HEADING = qs.get("heading") === "1";
 let heading = null, heading0 = null;
+// wearer-camera video (view node only): ?video=1 streams JPEG frames to the Pi (IF-5.6)
+let videoOn = qs.get("video") === "1";
+let VFPS = parseFloat(qs.get("vfps") || "15");
+const VQUALITY = parseFloat(qs.get("vq") || "0.6");
+let vseq = 0, capCanvas = null, capCtx = null, vtimer = null;
 const WS_URL    = (location.protocol === "https:" ? "wss://" : "ws://") +
                   (qs.get("host") || location.host) + "/ws";
 document.getElementById("who").textContent = "node · " + NODE_ID;
@@ -75,6 +80,11 @@ function connect() {
     ws.send(JSON.stringify({ role:"sensor", node_id:NODE_ID, pose:currentPose() })); };
   ws.onclose = () => { wsReady = false; setLink(false); setTimeout(connect, 1500); };
   ws.onerror = () => { try { ws.close(); } catch(e){} };
+  ws.onmessage = (ev) => {   // relay can turn wearer video on/off (IF-5.0 video_ctrl)
+    try { const m = JSON.parse(ev.data);
+      if (m.type === "video_ctrl") { videoOn = !!m.stream_video; if (m.fps) VFPS = m.fps; startVideoTimer(); }
+    } catch (e) {}
+  };
 }
 function setLink(on){ el("ldot").classList.toggle("on",on); el("lstate").textContent = on?"live":"offline"; }
 
@@ -108,6 +118,32 @@ async function startHeading() {   // call inside the Start click (iOS needs HTTP
 }
 if (typeof document !== "undefined") el("zeroBtn").onclick = () => { if (heading !== null) heading0 = heading; };
 
+// ---- wearer-camera video: capture JPEG frames, send as IF-5.6 binary WS frames ----
+function skv2(nodeId, tsMs, w, h, seq, jpeg) {   // 36-byte SKV2 header + JPEG (>4sBBH8sQHHII)
+  const hdr = new Uint8Array(36), dv = new DataView(hdr.buffer);
+  hdr.set([0x53, 0x4b, 0x56, 0x32], 0);          // "SKV2"
+  dv.setUint8(4, 2); dv.setUint8(5, 0); dv.setUint16(6, 0);
+  const nid = new TextEncoder().encode(nodeId);
+  for (let i = 0; i < 8; i++) dv.setUint8(8 + i, i < nid.length ? nid[i] : 0);
+  dv.setBigUint64(16, BigInt(tsMs)); dv.setUint16(24, w); dv.setUint16(26, h);
+  dv.setUint32(28, seq >>> 0); dv.setUint32(32, jpeg.length >>> 0);
+  const out = new Uint8Array(36 + jpeg.length); out.set(hdr, 0); out.set(jpeg, 36);
+  return out.buffer;
+}
+function sendVideo() {
+  if (!videoOn || !ws || ws.readyState !== 1 || !vid || vid.readyState < 2) return;
+  const w = vid.videoWidth, h = vid.videoHeight; if (!w) return;
+  if (!capCanvas) { capCanvas = document.createElement("canvas"); capCtx = capCanvas.getContext("2d"); }
+  if (capCanvas.width !== w) { capCanvas.width = w; capCanvas.height = h; }
+  capCtx.drawImage(vid, 0, 0, w, h);
+  capCanvas.toBlob(b => {                         // async encode; never blocks the detection loop
+    if (!b || !ws || ws.readyState !== 1) return;
+    b.arrayBuffer().then(buf => { if (ws && ws.readyState === 1)
+      ws.send(skv2(NODE_ID, Date.now(), w, h, vseq++, new Uint8Array(buf))); });
+  }, "image/jpeg", VQUALITY);
+}
+function startVideoTimer() { if (videoOn && !vtimer) vtimer = setInterval(sendVideo, Math.max(33, 1000 / VFPS)); }
+
 // ---- camera + pose ----
 let pose = null, raf = 0, lastT = 0, frames = 0, fpsT = 0, lastSent = 0;
 // jitter control: drop weak detections, EMA-smooth bearing/range across frames
@@ -137,6 +173,7 @@ async function start() {
     minTrackingConfidence: DET_CONF });
   connect();
   loop();
+  startVideoTimer();   // begins wearer-video capture if ?video=1 (or when video_ctrl enables it)
 }
 
 function loop() {
