@@ -13,13 +13,17 @@ def fmt(m):
     t = m.get("type", "?")
     if t == "remote_contacts":
         cs = m.get("contacts", [])
-        head = "remote_contacts %-3s %d contact%s" % (m.get("node_id", "?"), len(cs),
-                                                      "" if len(cs) == 1 else "s")
+        head = "remote_contacts v%s %-3s %sx%s pose=%s %d contact%s" % (
+            m.get("v", "?"), m.get("node_id", "?"), m.get("width"), m.get("height"),
+            "null" if m.get("pose") is None else "set",
+            len(cs), "" if len(cs) == 1 else "s")
         if cs:
             c = cs[0]
             rng = c.get("range_m")
-            head += "  bearing %.1f  range %s" % (
-                c.get("bearing_deg", 0.0), ("%.1f m" % rng) if rng is not None else "n/a")
+            box = c.get("box")
+            head += "  bearing %.1f  range %s  box %s" % (
+                c.get("bearing_deg", 0.0), ("%.1f m" % rng) if rng is not None else "null",
+                "null" if box is None else box)
         return head
     return "%s %s" % (t, json.dumps({k: v for k, v in m.items() if k not in ("type",)}))
 
