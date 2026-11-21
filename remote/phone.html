@@ -32,6 +32,7 @@
     <span class="pill" id="who">sensor</span>
     <span class="pill" id="link"><span class="dot" id="ldot"></span><span id="lstate">offline</span></span>
     <span class="pill" id="hdg" style="display:none">HDG --</span>
+    <span class="pill" id="tag" style="display:none">TAG --</span>
     <button class="pill" id="zeroBtn" style="display:none;border:0;color:#07090c;background:#ffd23d;font-weight:600">Zero heading</button>
     <button class="pill" id="calBtn" style="border:0;color:#07090c;background:#7fd4ff;font-weight:600">Calibrate 2 m</button>
   </header>
@@ -64,6 +65,23 @@ let videoOn = qs.get("video") === "1";
 let VFPS = parseFloat(qs.get("vfps") || "15");
 const VQUALITY = parseFloat(qs.get("vq") || "0.6");
 let vseq = 0, capCanvas = null, capCtx = null, vtimer = null;
+// ---- fiducial-marker self-localization (?tag=1): the moving R1 phone detects an ArUco marker,
+// treats it as the room origin, and reports THIS camera's own room pose in every message
+// (through currentPose(), so no new wire contract). Default OFF -> R2 / non-tag phones unchanged.
+const TAG       = qs.get("tag") === "1";
+const TAG_MM    = parseFloat(qs.get("tagmm") || "150");                 // marker side length, mm
+const TAG_ID    = qs.get("tagid") != null ? parseInt(qs.get("tagid"), 10) : null;  // only this marker id
+const TAG_DICT  = qs.get("tagdict") || "ARUCO_MIP_36h12";              // js-aruco2 dictionary (or "ARUCO")
+const TAG_MAP   = qs.get("tagmap") || "xz";                            // 3D->floor axis map (tunable on-device)
+const TAG_YAW   = parseFloat(qs.get("tagyaw") || "0");                 // additive yaw offset, deg
+const TAG_HZ    = parseFloat(qs.get("taghz") || "10");                 // marker detection rate (own throttle)
+const TAG_DET_W = parseInt(qs.get("tagw") || "320", 10);              // downscaled detect width, px
+const TAG_HOLD_MS = 1000;                                             // hold last good pose after marker drops
+const ARUCO_URL = "https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/aruco.js/+esm";
+const POSIT_URL = "https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/posit1.js/+esm";
+let AR = null, POS = null;                                             // loaded lazily in start(), only when TAG
+let tagDetector = null, tagPosit = null, tagCanvas = null, tagCtx = null, tagTimer = null;
+let tagPoseGood = null, tagPoseGoodT = -1e9;                          // last good camera pose + its performance.now()
 const WS_URL    = (location.protocol === "https:" ? "wss://" : "ws://") +
                   (qs.get("host") || location.host) + "/ws";
 document.getElementById("who").textContent = "node · " + NODE_ID;
@@ -101,7 +119,12 @@ function liveYaw() {   // (-180,180], degrees clockwise from room +y; null until
   if (heading === null || heading0 === null) return null;
   return ((heading - heading0 + 540) % 360) - 180;
 }
+function tagPoseNow() {   // live marker-derived pose, last good within TAG_HOLD_MS, else null
+  if (tagPoseGood && performance.now() - tagPoseGoodT <= TAG_HOLD_MS) return tagPoseGood;
+  return null;                                      // unknown -> null (IF-1), never a 0,0,0 sentinel
+}
 function currentPose() {   // use instead of POSE in every ws.send
+  if (TAG) return tagPoseNow();                    // ?tag=1: this moving camera's own live room pose
   if (!HEADING) return POSE;                       // R2 / non-heading phones: unchanged
   const base = POSE || { x_m: 0, y_m: 0 };
   return { x_m: base.x_m, y_m: base.y_m, yaw_deg: liveYaw() };   // yaw_deg null until zeroed
@@ -144,6 +167,79 @@ function sendVideo() {
   }, "image/jpeg", VQUALITY);
 }
 function startVideoTimer() { if (videoOn && !vtimer) vtimer = setInterval(sendVideo, Math.max(33, 1000 / VFPS)); }
+
+// ---- fiducial-marker self-localization ---------------------------------------------------------
+// Pure, unit-tested core (test_tagpose.mjs). POSIT gives the marker's pose in the CAMERA frame:
+//   p_cam = R * p_marker + t,  with t = the marker CENTRE in camera coords (same units as TAG_MM, mm).
+// Invert it to get THIS camera's pose in the marker (room) frame:
+//   R_cam = transpose(R)  (camera->marker);   t_cam = -R_cam * t  (camera position in marker coords, mm).
+// Camera forward = 3rd column of R_cam (camera +z expressed in marker coords). Project the camera
+// position + forward onto the 2D room floor via a tunable axis convention (tagmap) + yaw offset
+// (tagyaw), because the physical marker's mounting (wall vs floor, which way +z faces) sets the
+// sign/axis, which can only be nailed down on-device. Room frame (IF-1): +y forward, +x right,
+// yaw_deg clockwise from +y. Default tagmap=xz: marker +x = room right, marker +z = room forward.
+function cameraPoseFromMarker(R, t, tagmap, tagyawDeg) {
+  const Rc = [[R[0][0], R[1][0], R[2][0]],         // transpose(R) = camera->marker rotation
+              [R[0][1], R[1][1], R[2][1]],
+              [R[0][2], R[1][2], R[2][2]]];
+  const tc = [-(Rc[0][0] * t[0] + Rc[0][1] * t[1] + Rc[0][2] * t[2]),   // -R_cam * t, mm
+              -(Rc[1][0] * t[0] + Rc[1][1] * t[1] + Rc[1][2] * t[2]),
+              -(Rc[2][0] * t[0] + Rc[2][1] * t[1] + Rc[2][2] * t[2])];
+  const fwd = [Rc[0][2], Rc[1][2], Rc[2][2]];      // camera forward (+z) in marker coords
+  const m = [tc[0] / 1000, tc[1] / 1000, tc[2] / 1000];                // mm -> metres
+  // Each mapping: which marker axes become room (x=right, y=forward) and the floor-heading axes.
+  let rx, ry, hx, hy;
+  switch (tagmap) {
+    case "xz":      rx =  m[0]; ry =  m[2]; hx =  fwd[0]; hy =  fwd[2]; break; // default: +z into room
+    case "xz_negz": rx =  m[0]; ry = -m[2]; hx =  fwd[0]; hy = -fwd[2]; break; // marker +z out of room
+    case "xz_negx": rx = -m[0]; ry =  m[2]; hx = -fwd[0]; hy =  fwd[2]; break; // mirror the x axis
+    case "xy":      rx =  m[0]; ry =  m[1]; hx =  fwd[0]; hy =  fwd[1]; break; // marker flat on floor, +y forward
+    case "xy_negy": rx =  m[0]; ry = -m[1]; hx =  fwd[0]; hy = -fwd[1]; break;
+    case "zx":      rx =  m[2]; ry =  m[0]; hx =  fwd[2]; hy =  fwd[0]; break; // swap the two floor axes
+    default:        rx =  m[0]; ry =  m[2]; hx =  fwd[0]; hy =  fwd[2]; break; // = xz
+  }
+  let yaw = Math.atan2(hx, hy) * 180 / Math.PI + (tagyawDeg || 0);   // CW from room +y: atan2(x_comp, y_comp)
+  yaw = ((yaw + 540) % 360) - 180;                 // normalize to (-180, 180]
+  return { x_m: Math.round(rx * 1000) / 1000, y_m: Math.round(ry * 1000) / 1000,
+           yaw_deg: Math.round(yaw * 10) / 10 };
+}
+
+function tagPill(txt, ok) { const e = el("tag"); if (!e) return;
+  e.style.display = "inline-block"; e.textContent = txt; e.classList.toggle("on", !!ok); }
+
+// One detection pass: draw the live frame downscaled, find the marker, run POSIT -> camera room pose.
+// Own throttle (TAG_HZ) and fully try/catch-wrapped so a bad frame or CDN hiccup never stalls or
+// kills the MediaPipe rAF loop. Pill is refreshed EVERY tick (ok / hold / lost), not only on a hit.
+function tagDetect() {
+  if (!TAG || !tagDetector || !POS || !vid || vid.readyState < 2) return;
+  try {
+    const vw = vid.videoWidth, vh = vid.videoHeight; if (!vw) return;
+    const dw = TAG_DET_W, dh = Math.max(1, Math.round(vh * dw / vw));
+    if (!tagCanvas) { tagCanvas = document.createElement("canvas");
+      tagCtx = tagCanvas.getContext("2d", { willReadFrequently: true }); }   // avoid Safari readback stall
+    if (tagCanvas.width !== dw || tagCanvas.height !== dh) { tagCanvas.width = dw; tagCanvas.height = dh; }
+    tagCtx.drawImage(vid, 0, 0, dw, dh);
+    const markers = tagDetector.detect(tagCtx.getImageData(0, 0, dw, dh));
+    let mk = null;
+    for (const m of markers) { if (TAG_ID === null || m.id === TAG_ID) { mk = m; break; } }
+    const now = performance.now();
+    if (!mk) {                                     // no marker this frame: keep last good until it expires
+      tagPill(tagPoseGood && now - tagPoseGoodT <= TAG_HOLD_MS ? "TAG hold" : "TAG LOST", false);
+      return;
+    }
+    // focal length in px AT the detection canvas width, from this node's calibrated HFOV (IF-1).
+    const fpx = (dw / 2) / Math.tan(HFOV_DEG * Math.PI / 360);
+    if (!tagPosit || tagPosit._f !== fpx) { tagPosit = new POS.Posit(TAG_MM, fpx); tagPosit._f = fpx; }
+    // POSIT wants the 4 corners centred on the principal point with y pointing UP.
+    const pts = mk.corners.map(c => ({ x: c.x - dw / 2, y: dh / 2 - c.y }));
+    const p = tagPosit.pose(pts);
+    const cp = cameraPoseFromMarker(p.bestRotation, p.bestTranslation, TAG_MAP, TAG_YAW);
+    tagPoseGood = cp; tagPoseGoodT = now;
+    tagPill("TAG " + mk.id + " " + cp.x_m.toFixed(2) + "," + cp.y_m.toFixed(2) +
+            " " + cp.yaw_deg.toFixed(0) + "°", true);
+  } catch (e) { tagPill("TAG ERR", false); }
+}
+function startTagTimer() { if (TAG && !tagTimer) tagTimer = setInterval(tagDetect, Math.max(50, 1000 / TAG_HZ)); }
 
 // ---- camera + pose ----
 let pose = null, raf = 0, lastT = 0, frames = 0, fpsT = 0, lastSent = 0;
@@ -295,6 +391,15 @@ async function start() {
   connect();
   loop();
   startVideoTimer();   // begins wearer-video capture if ?video=1 (or when video_ctrl enables it)
+  if (TAG) {           // load ArUco + POSIT lazily; own try/catch so a CDN failure can't touch MediaPipe
+    try {
+      AR  = (await import(ARUCO_URL)).default;      // AR namespace (Detector, Marker, Dictionary)
+      POS = (await import(POSIT_URL)).default;      // POS namespace (Posit pose estimator)
+      tagDetector = new AR.Detector({ dictionaryName: TAG_DICT });
+      tagPill("TAG " + TAG_DICT, false);
+      startTagTimer();
+    } catch (e) { tagPill("TAG LOAD FAIL", false); }
+  }
 }
 
 function loop() {
@@ -360,7 +465,7 @@ function loop() {
   if (contacts.length) { el("sB").textContent = contacts[0].bearing_deg.toFixed(1) + "deg";
                          el("sC").textContent = contacts[0].conf.toFixed(2); }
   else { el("sB").textContent = "-"; el("sC").textContent = "-"; }
-  const interval = HEADING ? 66 : (contacts.length ? 66 : 200);  // >=10 Hz when sending live heading
+  const interval = (HEADING || TAG) ? 66 : (contacts.length ? 66 : 200);  // >=10 Hz for live heading / moving tag pose
   if (wsReady && now - lastSent > interval) {
     lastSent = now;
     ws.send(JSON.stringify({ type:"phone_detections", v:2, node_id:NODE_ID, pose:currentPose(),
