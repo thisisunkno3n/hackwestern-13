@@ -169,6 +169,7 @@ class Bridge:
 
     def emit(self, node_id, pose, contacts, width, height, hfov_deg):
         # stamp ids + assemble IF-5.4 remote_contacts. Missing values stay null.
+        contacts = contacts[:16]   # Pi decoder limit, SEEKER_MAX_CONTACTS (common/seeker_msgs.h)
         for i, ct in enumerate(contacts, 1):
             ct.setdefault("id", "%s-%d" % (node_id, i))
             ct.setdefault("cls", "person")
