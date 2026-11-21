@@ -33,6 +33,7 @@
     <span class="pill" id="link"><span class="dot" id="ldot"></span><span id="lstate">offline</span></span>
     <span class="pill" id="hdg" style="display:none">HDG --</span>
     <button class="pill" id="zeroBtn" style="display:none;border:0;color:#07090c;background:#ffd23d;font-weight:600">Zero heading</button>
+    <button class="pill" id="calBtn" style="border:0;color:#07090c;background:#7fd4ff;font-weight:600">Calibrate 2 m</button>
   </header>
   <div class="stage">
     <video id="vid" playsinline muted></video>
@@ -146,15 +147,118 @@ function startVideoTimer() { if (videoOn && !vtimer) vtimer = setInterval(sendVi
 
 // ---- camera + pose ----
 let pose = null, raf = 0, lastT = 0, frames = 0, fpsT = 0, lastSent = 0;
-// jitter control: drop weak detections, EMA-smooth bearing/range across frames
-const MAX_PPL   = parseInt(qs.get("maxppl")   || "2");      // max people (set to real count to kill phantoms)
+// jitter control: drop weak detections, one-euro-smooth bearing/pixel-height across frames
+const MAX_PPL   = parseInt(qs.get("maxppl")   || "5");      // MediaPipe numPoses; ?maxppl=2 for the 2-person test only
 const DET_CONF  = parseFloat(qs.get("detconf") || "0.6");    // MediaPipe detection/presence/tracking threshold
 const CONF_MIN  = parseFloat(qs.get("confmin") || "0.6");    // gate low-visibility (clipped/ghost) poses
-const SMOOTH    = parseFloat(qs.get("smooth")  || "0.25");   // EMA weight on new frame (lower = smoother, laggier)
-const MAX_STEP  = parseFloat(qs.get("maxstep") || "4");      // deg/frame slew cap (kills spikes)
-const DEADBAND  = parseFloat(qs.get("deadband")|| "0.4");    // deg: ignore wiggle smaller than this
-const ASSOC_DEG = 12;                                        // match a detection to last frame within this many deg
-let prevSmoothed = [];
+const ASSOC_DEG = 12;                                        // bearing match, only when a detection has no box
+
+// ---- range from pose landmarks + one-euro smoothing ----
+const HEIGHT_M       = parseFloat(qs.get("height_m") || "1.7"); // assumed standing height (m)
+const CAL_M          = parseFloat(qs.get("cal_m")    || "2");   // calibration distance (m)
+const VIS_MIN        = 0.5;   // landmark visibility needed for the full / torso methods
+const EYE_ANKLE_FRAC = 0.90;  // eye (or nose) to mid-ankle, fraction of standing height
+const TORSO_FRAC     = 0.30;  // mid-shoulder to mid-hip, fraction of standing height
+const OE_ON          = qs.get("oe") !== "0";                    // ?oe=0: raw, for comparison
+const OE_MIN_CUTOFF  = parseFloat(qs.get("oe_min")  || "1.0");  // Hz
+const OE_BETA        = parseFloat(qs.get("oe_beta") || "0.007");
+const OE_D_CUTOFF    = 1.0;   // Hz
+const TRACK_DROP_S   = 0.5;   // forget a person unmatched this long
+const CAL_KEY        = "seeker_f_range_" + NODE_ID;
+
+if (qs.get("cal") === "clear") localStorage.removeItem(CAL_KEY);
+let cal = (() => { try { return JSON.parse(localStorage.getItem(CAL_KEY)); } catch (e) { return null; } })();
+// focal length for range: calibrated when available (scaled to this width), else from hfov
+function rangeFocal(W, fFov) { return cal && cal.f_px > 0 && cal.w > 0 ? cal.f_px * W / cal.w : fFov; }
+
+const vis = p => (p && p.visibility) || 0;
+const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+const pxDist = (a, b, W, H) => Math.hypot((a.x - b.x) * W, (a.y - b.y) * H);
+
+// Pixel height of the whole person, and how it was measured: { hpx, src } or null.
+function personHeightPx(lms, box, W, H) {
+  const ankles = [lms[27], lms[28]].filter(p => vis(p) > VIS_MIN);
+  const eyes = [lms[2], lms[5]].filter(p => vis(p) > VIS_MIN);
+  const top = eyes.length === 2 ? mid(eyes[0], eyes[1]) : eyes.length ? eyes[0]
+            : vis(lms[0]) > VIS_MIN ? lms[0] : null;
+  if (ankles.length && top) {
+    const foot = ankles.length === 2 ? mid(ankles[0], ankles[1]) : ankles[0];
+    const len = pxDist(top, foot, W, H);
+    if (len > 10) return { hpx: len / EYE_ANKLE_FRAC, src: "full" };
+  }
+  const sh = [lms[11], lms[12]], hp = [lms[23], lms[24]];
+  if (sh.every(p => vis(p) > VIS_MIN) && hp.every(p => vis(p) > VIS_MIN)) {
+    const len = pxDist(mid(sh[0], sh[1]), mid(hp[0], hp[1]), W, H);
+    if (len > 5) return { hpx: len / TORSO_FRAC, src: "torso" };
+  }
+  if (box && box[3] > 0) return { hpx: box[3], src: "box" };
+  return null;
+}
+
+// One-euro filter (Casiez, Roussel, Vogel, CHI 2012). t in seconds.
+function oeAlpha(cutoff, dt) { const tau = 1 / (2 * Math.PI * cutoff); return 1 / (1 + tau / dt); }
+class OneEuro {
+  constructor(minCutoff = OE_MIN_CUTOFF, beta = OE_BETA, dCutoff = OE_D_CUTOFF) {
+    this.minCutoff = minCutoff; this.beta = beta; this.dCutoff = dCutoff;
+    this.x = null; this.dx = 0; this.t = null;
+  }
+  filter(x, t) {
+    if (this.x === null) { this.x = x; this.t = t; return x; }
+    const dt = Math.max(1e-3, t - this.t); this.t = t;
+    const a_d = oeAlpha(this.dCutoff, dt);
+    this.dx = a_d * ((x - this.x) / dt) + (1 - a_d) * this.dx;
+    const a = oeAlpha(this.minCutoff + this.beta * Math.abs(this.dx), dt);
+    this.x = a * x + (1 - a) * this.x;
+    return this.x;
+  }
+}
+
+// Per-person tracks with a stable id, for N people. Match cost: box IoU first, then box center
+// distance, then raw bearing when there is no box. Cheapest pairs first, each track used once.
+function iou(a, b) {
+  const x0 = Math.max(a[0], b[0]), y0 = Math.max(a[1], b[1]);
+  const x1 = Math.min(a[0] + a[2], b[0] + b[2]), y1 = Math.min(a[1] + a[3], b[1] + b[3]);
+  const inter = Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+  const uni = a[2] * a[3] + b[2] * b[3] - inter;
+  return uni > 0 ? inter / uni : 0;
+}
+function matchCost(c, tr) {
+  if (c.box && tr.box) {
+    const u = iou(c.box, tr.box);
+    if (u > 0.1) return 1 - u;                                       // 0 .. 0.9
+    const d = Math.hypot(c.box[0] + c.box[2] / 2 - tr.box[0] - tr.box[2] / 2,
+                         c.box[1] + c.box[3] / 2 - tr.box[1] - tr.box[3] / 2);
+    const s = Math.max(c.box[2], tr.box[2], 1);
+    return d < 0.75 * s ? 1 + d / s : Infinity;                      // 1 .. 1.75
+  }
+  const db = Math.abs(tr.bearingRaw - c.bearing_deg);
+  return db < ASSOC_DEG ? 2 + db / ASSOC_DEG : Infinity;             // 2 .. 3
+}
+let tracks = [], nextTrackId = 1;
+function assoc(raw, t) {
+  const pairs = [];
+  raw.forEach((c, i) => tracks.forEach(tr => {
+    const cost = matchCost(c, tr);
+    if (cost < Infinity) pairs.push([cost, i, tr]);
+  }));
+  pairs.sort((a, b) => a[0] - b[0]);
+  const match = new Array(raw.length).fill(null), taken = new Set();
+  for (const [, i, tr] of pairs) if (!match[i] && !taken.has(tr)) { match[i] = tr; taken.add(tr); }
+  raw.forEach((c, i) => {
+    if (!match[i]) { match[i] = { id: nextTrackId++, fB: new OneEuro(), fH: new OneEuro(),
+                                  hpx: null, src: null }; tracks.push(match[i]); }
+    match[i].seen = t; match[i].box = c.box; match[i].bearingRaw = c.bearing_deg;
+  });
+  tracks = tracks.filter(tr => t - tr.seen < TRACK_DROP_S);
+  return match;
+}
+
+// Calibration: one person at CAL_M, median hpx over 1.5 s.
+let calib = null;
+function showCal() { el("calBtn").textContent = cal ? "f " + cal.f_px.toFixed(0) + " px (" + cal.src + ")" : "Calibrate " + CAL_M + " m"; }
+el("calBtn").onclick = () => { calib = { until: performance.now() + 1500, samples: [], src: null };
+                               el("calBtn").textContent = "Hold still..."; };
+showCal();
 async function start() {
   el("startWrap").style.display = "none";
   const stream = await navigator.mediaDevices.getUserMedia({
@@ -202,29 +306,39 @@ function loop() {
       x0=Math.min(x0,p.x); y0=Math.min(y0,p.y); x1=Math.max(x1,p.x); y1=Math.max(y1,p.y); }
     const box = seen ? [Math.round(x0*W), Math.round(y0*H),
                         Math.round((x1-x0)*W), Math.round((y1-y0)*H)] : null;
-    const range_m = (box && box[3] > 0) ? f * 1.7 / box[3] : null;
-    raw.push({ bearing_deg, conf, box, range_m });
+    const ph = personHeightPx(lms, box, W, H);
+    raw.push({ bearing_deg, conf, box, ph });
     drawPose(lms, cxN);
   }
-  // temporal smoothing: match each detection to the nearest previous one in bearing, EMA-blend
-  const contacts = raw.map(c => {
-    let best = null, bd = ASSOC_DEG;
-    for (const p of prevSmoothed) { const d = Math.abs(p.bearing_deg - c.bearing_deg); if (d < bd) { bd = d; best = p; } }
-    if (best) {
-      let b = SMOOTH * c.bearing_deg + (1 - SMOOTH) * best.bearing_deg;   // EMA
-      if (Math.abs(b - best.bearing_deg) < DEADBAND) b = best.bearing_deg; // ignore micro-wiggle
-      const step = b - best.bearing_deg;                                   // slew limit: kill spikes
-      if (step >  MAX_STEP) b = best.bearing_deg + MAX_STEP;
-      if (step < -MAX_STEP) b = best.bearing_deg - MAX_STEP;
-      c.bearing_deg = b;
-      if (c.range_m != null && best.range_m != null) c.range_m = SMOOTH * c.range_m + (1 - SMOOTH) * best.range_m;
-    }
-    c.bearing_deg = Math.round(c.bearing_deg * 10) / 10;
-    if (c.range_m != null) c.range_m = Math.round(c.range_m * 10) / 10;
-    c.conf = Math.round(c.conf * 100) / 100;
-    return c;
+  // one-euro per tracked person on bearing and pixel height, then range from height
+  const tS = now / 1000;
+  const fR = rangeFocal(W, f);
+  const match = assoc(raw, tS);
+  const contacts = raw.map((c, i) => {
+    const tr = match[i];
+    let b = c.bearing_deg, hpx = c.ph ? c.ph.hpx : null;
+    if (OE_ON) { b = tr.fB.filter(b, tS); if (hpx !== null) hpx = tr.fH.filter(hpx, tS); }
+    tr.hpx = hpx; tr.src = c.ph ? c.ph.src : null;
+    const range_m = hpx > 0 ? fR * HEIGHT_M / hpx : null;
+    return { id: NODE_ID + "-p" + tr.id,
+             bearing_deg: Math.round(b * 10) / 10,
+             conf: Math.round(c.conf * 100) / 100,
+             box: c.box,
+             range_m: range_m === null ? null : Math.round(range_m * 100) / 100,  // 1 cm, not 10 cm
+             range_src: range_m === null ? null : tr.src };
   });
-  prevSmoothed = contacts;
+  if (calib) {
+    if (contacts.length === 1 && match[0].hpx > 0) { calib.samples.push(match[0].hpx); calib.src = match[0].src; }
+    if (now > calib.until) {
+      const s = calib.samples.sort((a, b) => a - b);
+      if (s.length >= 10) {
+        cal = { f_px: CAL_M * s[s.length >> 1] / HEIGHT_M, w: W, src: calib.src };
+        localStorage.setItem(CAL_KEY, JSON.stringify(cal));
+        showCal();
+      } else el("calBtn").textContent = "Cal failed: need 1 person";
+      calib = null;
+    }
+  }
   if (contacts.length) { el("sB").textContent = contacts[0].bearing_deg.toFixed(1) + "deg";
                          el("sC").textContent = contacts[0].conf.toFixed(2); }
   else { el("sB").textContent = "-"; el("sC").textContent = "-"; }
