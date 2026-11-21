@@ -78,10 +78,9 @@ function synth(tagmap, X, Y, yawDeg) {
   const y = d2r(yawDeg), H = -1700, Zc = 2000;     // arbitrary off-floor components
   let tcam, fwd;
   switch (tagmap) {
-    case "xz":      tcam = [X*1000, H,       Y*1000]; fwd = [Math.sin(y), 0,  Math.cos(y)]; break;
-    case "xz_negz": tcam = [X*1000, H,      -Y*1000]; fwd = [Math.sin(y), 0, -Math.cos(y)]; break;
-    case "xy":      tcam = [X*1000, Y*1000,  Zc];     fwd = [Math.sin(y), Math.cos(y), 0];  break;
-    case "zx":      tcam = [Y*1000, H,       X*1000]; fwd = [Math.cos(y), 0,  Math.sin(y)]; break;
+    case "xz":        tcam = [X*1000, H,   Y*1000]; fwd = [Math.sin(y), 0,  Math.cos(y)]; break;
+    case "xz_rot180": tcam = [-X*1000, H, -Y*1000]; fwd = [-Math.sin(y), 0, -Math.cos(y)]; break;
+    case "xy":        tcam = [X*1000, Y*1000, Zc];  fwd = [Math.sin(y), Math.cos(y), 0];  break;
     default: throw new Error("synth: unhandled map " + tagmap);
   }
   const Rcam = rotFromForward(fwd);
@@ -104,10 +103,9 @@ caseTest("xz", 1.5, 3.0, 30);
 caseTest("xz", -2.0, 4.2, -90);
 caseTest("xz", 0.0, 2.5, 0);
 caseTest("xz", 0.75, 1.1, 170);
-// alternative mappings exposed via ?tagmap=
-caseTest("xz_negz", 1.5, 3.0, 45);
+// alternative mappings exposed via ?tagmap= (mirror maps removed per Felix review)
+caseTest("xz_rot180", 1.5, 3.0, 45);
 caseTest("xy", -1.2, 2.8, -60);
-caseTest("zx", 2.0, -1.5, 120);
 // the additive yaw offset (?tagyaw=) is applied
 (() => {
   const { R, t } = synth("xz", 1.0, 2.0, 10);
