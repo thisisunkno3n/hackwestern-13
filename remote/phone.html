@@ -31,6 +31,8 @@
     <b>EagleEye</b>
     <span class="pill" id="who">sensor</span>
     <span class="pill" id="link"><span class="dot" id="ldot"></span><span id="lstate">offline</span></span>
+    <span class="pill" id="hdg" style="display:none">HDG --</span>
+    <button class="pill" id="zeroBtn" style="display:none;border:0;color:#07090c;background:#ffd23d;font-weight:600">Zero heading</button>
   </header>
   <div class="stage">
     <video id="vid" playsinline muted></video>
@@ -53,6 +55,9 @@ const HFOV_DEG  = parseFloat(qs.get("hfov") || "66");       // horizontal FOV of
 // taped pose x_m,y_m,yaw_deg; null (not 0,0,0) when not given, so the Pi can tell "unknown" apart
 const POSE = (() => { const r = qs.get("pose"); if (!r) return null;
   const a = r.split(",").map(Number); return {x_m: a[0]||0, y_m: a[1]||0, yaw_deg: a[2]||0}; })();
+// live compass heading (helmet/worn phone): ?heading=1 -> send live yaw in every message
+const HEADING = qs.get("heading") === "1";
+let heading = null, heading0 = null;
 const WS_URL    = (location.protocol === "https:" ? "wss://" : "ws://") +
                   (qs.get("host") || location.host) + "/ws";
 document.getElementById("who").textContent = "node · " + NODE_ID;
@@ -67,17 +72,51 @@ let ws = null, wsReady = false;
 function connect() {
   ws = new WebSocket(WS_URL);
   ws.onopen = () => { wsReady = true; setLink(true);
-    ws.send(JSON.stringify({ role:"sensor", node_id:NODE_ID, pose:POSE })); };
+    ws.send(JSON.stringify({ role:"sensor", node_id:NODE_ID, pose:currentPose() })); };
   ws.onclose = () => { wsReady = false; setLink(false); setTimeout(connect, 1500); };
   ws.onerror = () => { try { ws.close(); } catch(e){} };
 }
 function setLink(on){ el("ldot").classList.toggle("on",on); el("lstate").textContent = on?"live":"offline"; }
 
+// ---- live compass heading (only when ?heading=1) ----
+function onOrient(e) {
+  if (typeof e.webkitCompassHeading === "number") heading = e.webkitCompassHeading;   // iOS, CW from magnetic N
+  else if (e.absolute !== false && typeof e.alpha === "number") heading = (360 - e.alpha) % 360;
+  else return;
+  const y = liveYaw();
+  el("hdg").textContent = "HDG " + heading.toFixed(0) + "  YAW " + (y === null ? "NOT ZEROED" : y.toFixed(0));
+}
+function liveYaw() {   // (-180,180], degrees clockwise from room +y; null until zeroed
+  if (heading === null || heading0 === null) return null;
+  return ((heading - heading0 + 540) % 360) - 180;
+}
+function currentPose() {   // use instead of POSE in every ws.send
+  if (!HEADING) return POSE;                       // R2 / non-heading phones: unchanged
+  const base = POSE || { x_m: 0, y_m: 0 };
+  return { x_m: base.x_m, y_m: base.y_m, yaw_deg: liveYaw() };   // yaw_deg null until zeroed
+}
+async function startHeading() {   // call inside the Start click (iOS needs HTTPS + a user gesture), before getUserMedia
+  if (!HEADING) return;
+  if (typeof DeviceOrientationEvent !== "undefined" &&
+      typeof DeviceOrientationEvent.requestPermission === "function") {
+    const r = await DeviceOrientationEvent.requestPermission();
+    if (r !== "granted") throw new Error("compass permission denied");
+  }
+  if ("ondeviceorientationabsolute" in window) addEventListener("deviceorientationabsolute", onOrient);
+  else addEventListener("deviceorientation", onOrient);
+  el("zeroBtn").style.display = "inline-block"; el("hdg").style.display = "inline-block";
+}
+if (typeof document !== "undefined") el("zeroBtn").onclick = () => { if (heading !== null) heading0 = heading; };
+
 // ---- camera + pose ----
 let pose = null, raf = 0, lastT = 0, frames = 0, fpsT = 0, lastSent = 0;
 // jitter control: drop weak detections, EMA-smooth bearing/range across frames
-const CONF_MIN = parseFloat(qs.get("confmin") || "0.45");   // gate low-visibility (clipped) poses
-const SMOOTH   = parseFloat(qs.get("smooth")  || "0.35");   // EMA weight on the new frame (lower = smoother, laggier)
+const MAX_PPL   = parseInt(qs.get("maxppl")   || "2");      // max people (set to real count to kill phantoms)
+const DET_CONF  = parseFloat(qs.get("detconf") || "0.6");    // MediaPipe detection/presence/tracking threshold
+const CONF_MIN  = parseFloat(qs.get("confmin") || "0.6");    // gate low-visibility (clipped/ghost) poses
+const SMOOTH    = parseFloat(qs.get("smooth")  || "0.25");   // EMA weight on new frame (lower = smoother, laggier)
+const MAX_STEP  = parseFloat(qs.get("maxstep") || "4");      // deg/frame slew cap (kills spikes)
+const DEADBAND  = parseFloat(qs.get("deadband")|| "0.4");    // deg: ignore wiggle smaller than this
 const ASSOC_DEG = 12;                                        // match a detection to last frame within this many deg
 let prevSmoothed = [];
 async function start() {
@@ -93,7 +132,9 @@ async function start() {
     baseOptions: { modelAssetPath:
       "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
       delegate: "GPU" },
-    runningMode: "VIDEO", numPoses: 3 });
+    runningMode: "VIDEO", numPoses: MAX_PPL,
+    minPoseDetectionConfidence: DET_CONF, minPosePresenceConfidence: DET_CONF,
+    minTrackingConfidence: DET_CONF });
   connect();
   loop();
 }
@@ -133,7 +174,12 @@ function loop() {
     let best = null, bd = ASSOC_DEG;
     for (const p of prevSmoothed) { const d = Math.abs(p.bearing_deg - c.bearing_deg); if (d < bd) { bd = d; best = p; } }
     if (best) {
-      c.bearing_deg = SMOOTH * c.bearing_deg + (1 - SMOOTH) * best.bearing_deg;
+      let b = SMOOTH * c.bearing_deg + (1 - SMOOTH) * best.bearing_deg;   // EMA
+      if (Math.abs(b - best.bearing_deg) < DEADBAND) b = best.bearing_deg; // ignore micro-wiggle
+      const step = b - best.bearing_deg;                                   // slew limit: kill spikes
+      if (step >  MAX_STEP) b = best.bearing_deg + MAX_STEP;
+      if (step < -MAX_STEP) b = best.bearing_deg - MAX_STEP;
+      c.bearing_deg = b;
       if (c.range_m != null && best.range_m != null) c.range_m = SMOOTH * c.range_m + (1 - SMOOTH) * best.range_m;
     }
     c.bearing_deg = Math.round(c.bearing_deg * 10) / 10;
@@ -145,10 +191,10 @@ function loop() {
   if (contacts.length) { el("sB").textContent = contacts[0].bearing_deg.toFixed(1) + "deg";
                          el("sC").textContent = contacts[0].conf.toFixed(2); }
   else { el("sB").textContent = "-"; el("sC").textContent = "-"; }
-  const interval = contacts.length ? 66 : 200;              // ~15 Hz tracking, 5 Hz liveness
+  const interval = HEADING ? 66 : (contacts.length ? 66 : 200);  // >=10 Hz when sending live heading
   if (wsReady && now - lastSent > interval) {
     lastSent = now;
-    ws.send(JSON.stringify({ type:"phone_detections", v:2, node_id:NODE_ID, pose:POSE,
+    ws.send(JSON.stringify({ type:"phone_detections", v:2, node_id:NODE_ID, pose:currentPose(),
                              width:W, height:H, hfov_deg:HFOV_DEG, contacts }));
   }
 }
@@ -161,7 +207,7 @@ function drawPose(lms, cx) {
   ctx.beginPath(); ctx.moveTo(cx*W, 0); ctx.lineTo(cx*W, H); ctx.stroke();  // bearing line
 }
 
-el("startBtn").onclick = () => start().catch(e => { el("startWrap").style.display="flex";
+el("startBtn").onclick = () => startHeading().then(start).catch(e => { el("startWrap").style.display="flex";
   alert("camera/model error: " + e.message); });
 </script>
 </body>
