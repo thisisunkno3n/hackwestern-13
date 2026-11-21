@@ -75,6 +75,11 @@ function setLink(on){ el("ldot").classList.toggle("on",on); el("lstate").textCon
 
 // ---- camera + pose ----
 let pose = null, raf = 0, lastT = 0, frames = 0, fpsT = 0, lastSent = 0;
+// jitter control: drop weak detections, EMA-smooth bearing/range across frames
+const CONF_MIN = parseFloat(qs.get("confmin") || "0.45");   // gate low-visibility (clipped) poses
+const SMOOTH   = parseFloat(qs.get("smooth")  || "0.35");   // EMA weight on the new frame (lower = smoother, laggier)
+const ASSOC_DEG = 12;                                        // match a detection to last frame within this many deg
+let prevSmoothed = [];
 async function start() {
   el("startWrap").style.display = "none";
   const stream = await navigator.mediaDevices.getUserMedia({
@@ -106,10 +111,11 @@ function loop() {
   const W = ov.width, H = ov.height;
   const f = (W / 2) / Math.tan(HFOV_DEG * Math.PI / 360);   // focal length in px from FOV
   const poses = (res.landmarks && res.landmarks.length) ? res.landmarks : [];
-  const contacts = [];
+  const raw = [];
   for (const lms of poses) {
     const cxN = (lms[23].x + lms[24].x) / 2;                // normalized hip midpoint
     const conf = Math.min(1, ((lms[23].visibility||0) + (lms[24].visibility||0)) / 2);
+    if (conf < CONF_MIN) continue;                          // drop weak/clipped detections
     // pinhole bearing: atan((x - cx)/f), right of boresight positive (NOT linear in FOV)
     const bearing_deg = Math.atan((cxN * W - W / 2) / f) * 180 / Math.PI;
     // bbox from visible landmarks; null if none pass the visibility threshold
@@ -118,11 +124,24 @@ function loop() {
       x0=Math.min(x0,p.x); y0=Math.min(y0,p.y); x1=Math.max(x1,p.x); y1=Math.max(y1,p.y); }
     const box = seen ? [Math.round(x0*W), Math.round(y0*H),
                         Math.round((x1-x0)*W), Math.round((y1-y0)*H)] : null;
-    const range_m = (box && box[3] > 0) ? Math.round(f * 1.7 / box[3] * 10) / 10 : null;
-    contacts.push({ bearing_deg: Math.round(bearing_deg*10)/10,
-                    conf: Math.round(conf*100)/100, box, range_m });
+    const range_m = (box && box[3] > 0) ? f * 1.7 / box[3] : null;
+    raw.push({ bearing_deg, conf, box, range_m });
     drawPose(lms, cxN);
   }
+  // temporal smoothing: match each detection to the nearest previous one in bearing, EMA-blend
+  const contacts = raw.map(c => {
+    let best = null, bd = ASSOC_DEG;
+    for (const p of prevSmoothed) { const d = Math.abs(p.bearing_deg - c.bearing_deg); if (d < bd) { bd = d; best = p; } }
+    if (best) {
+      c.bearing_deg = SMOOTH * c.bearing_deg + (1 - SMOOTH) * best.bearing_deg;
+      if (c.range_m != null && best.range_m != null) c.range_m = SMOOTH * c.range_m + (1 - SMOOTH) * best.range_m;
+    }
+    c.bearing_deg = Math.round(c.bearing_deg * 10) / 10;
+    if (c.range_m != null) c.range_m = Math.round(c.range_m * 10) / 10;
+    c.conf = Math.round(c.conf * 100) / 100;
+    return c;
+  });
+  prevSmoothed = contacts;
   if (contacts.length) { el("sB").textContent = contacts[0].bearing_deg.toFixed(1) + "deg";
                          el("sC").textContent = contacts[0].conf.toFixed(2); }
   else { el("sB").textContent = "-"; el("sC").textContent = "-"; }

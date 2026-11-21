@@ -71,19 +71,20 @@ def serve_static(c, path):
 
 
 class Bridge:
-    def __init__(self, fusion_host, fusion_port):
+    def __init__(self, fusion_host, fusion_port, wire_v=2):
         self.dst = (fusion_host, fusion_port)
+        self.wire_v = wire_v          # 1 for fusion builds that only accept v1
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     def emit(self, node_id, pose, contacts, width, height, hfov_deg):
-        # stamp ids + assemble IF-5.4 remote_contacts (v2). Missing values stay null.
+        # stamp ids + assemble IF-5.4 remote_contacts. Missing values stay null.
         for i, ct in enumerate(contacts, 1):
             ct.setdefault("id", "%s-%d" % (node_id, i))
             ct.setdefault("cls", "person")
             ct.setdefault("box", None)
             ct.setdefault("range_m", None)
         now_ms = int(time.monotonic() * 1000)   # Pi receive clock (IF-1 clock rule)
-        msg = {"type": "remote_contacts", "v": 2, "src": node_id,
+        msg = {"type": "remote_contacts", "v": self.wire_v, "src": node_id,
                "t_mono_ms": now_ms, "ts_ms": now_ms, "node_id": node_id,
                "pose": pose, "width": width, "height": height, "hfov_deg": hfov_deg,
                "contacts": contacts}
@@ -169,12 +170,14 @@ def main():
     ap.add_argument("--port", type=int, default=8080, help="WS/HTTP listen port")
     ap.add_argument("--tls-cert", default=None, help="PEM cert -> serve HTTPS/WSS (needed for iPhone camera)")
     ap.add_argument("--tls-key", default=None, help="PEM private key")
+    ap.add_argument("--wire-version", type=int, default=2, choices=[1, 2],
+                    help="remote_contacts version to stamp (1 for fusion builds that only accept v1)")
     args = ap.parse_args()
     ctx = None
     if args.tls_cert and args.tls_key:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(args.tls_cert, args.tls_key)
-    bridge = Bridge(args.fusion, args.fusion_port)
+    bridge = Bridge(args.fusion, args.fusion_port, args.wire_version)
     s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
