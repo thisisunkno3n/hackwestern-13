@@ -215,8 +215,8 @@ class Bridge:
                 continue
             if m.get("node_id"):
                 node_id = m["node_id"]
-            if isinstance(m.get("pose"), dict):
-                pose = m["pose"]            # explicit pose:null leaves the last known value
+            if "pose" in m:                 # forward phone's pose verbatim; explicit null -> null
+                pose = m["pose"] if isinstance(m["pose"], dict) else None
             if m.get("width") is not None:
                 width = m["width"]
             if m.get("height") is not None:

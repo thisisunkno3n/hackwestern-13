@@ -69,13 +69,13 @@ let vseq = 0, capCanvas = null, capCtx = null, vtimer = null;
 // treats it as the room origin, and reports THIS camera's own room pose in every message
 // (through currentPose(), so no new wire contract). Default OFF -> R2 / non-tag phones unchanged.
 const TAG       = qs.get("tag") === "1";
-const TAG_MM    = parseFloat(qs.get("tagmm") || "150");                 // marker side length, mm
+const TAG_MM    = parseFloat(qs.get("tagmm") || "186");                 // marker side length, mm (our prints)
 const TAG_ID    = qs.get("tagid") != null ? parseInt(qs.get("tagid"), 10) : null;  // only this marker id
 const TAG_DICT  = qs.get("tagdict") || "ARUCO_MIP_36h12";              // js-aruco2 dictionary (or "ARUCO")
 const TAG_MAP   = qs.get("tagmap") || "xz";                            // 3D->floor axis map (tunable on-device)
 const TAG_YAW   = parseFloat(qs.get("tagyaw") || "0");                 // additive yaw offset, deg
 const TAG_HZ    = parseFloat(qs.get("taghz") || "10");                 // marker detection rate (own throttle)
-const TAG_DET_W = parseInt(qs.get("tagw") || "320", 10);              // downscaled detect width, px
+const TAG_DET_W = parseInt(qs.get("tagw") || "640", 10);              // downscaled detect width, px (~2.6 m range)
 const TAG_HOLD_MS = 1000;                                             // hold last good pose after marker drops
 const ARUCO_URL = "https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/aruco.js/+esm";
 const POSIT_URL = "https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/posit1.js/+esm";
@@ -190,13 +190,11 @@ function cameraPoseFromMarker(R, t, tagmap, tagyawDeg) {
   // Each mapping: which marker axes become room (x=right, y=forward) and the floor-heading axes.
   let rx, ry, hx, hy;
   switch (tagmap) {
-    case "xz":      rx =  m[0]; ry =  m[2]; hx =  fwd[0]; hy =  fwd[2]; break; // default: +z into room
-    case "xz_negz": rx =  m[0]; ry = -m[2]; hx =  fwd[0]; hy = -fwd[2]; break; // marker +z out of room
-    case "xz_negx": rx = -m[0]; ry =  m[2]; hx = -fwd[0]; hy =  fwd[2]; break; // mirror the x axis
-    case "xy":      rx =  m[0]; ry =  m[1]; hx =  fwd[0]; hy =  fwd[1]; break; // marker flat on floor, +y forward
-    case "xy_negy": rx =  m[0]; ry = -m[1]; hx =  fwd[0]; hy = -fwd[1]; break;
-    case "zx":      rx =  m[2]; ry =  m[0]; hx =  fwd[2]; hy =  fwd[0]; break; // swap the two floor axes
-    default:        rx =  m[0]; ry =  m[2]; hx =  fwd[0]; hy =  fwd[2]; break; // = xz
+    case "xz":       rx =  m[0]; ry =  m[2]; hx =  fwd[0]; hy =  fwd[2]; break; // default: marker +z into room
+    case "xz_rot180":rx = -m[0]; ry = -m[2]; hx = -fwd[0]; hy = -fwd[2]; break; // 180 deg rotation (NOT a mirror)
+    case "xy":       rx =  m[0]; ry =  m[1]; hx =  fwd[0]; hy =  fwd[1]; break; // marker flat on floor, +y forward
+    default:         rx =  m[0]; ry =  m[2]; hx =  fwd[0]; hy =  fwd[2]; break; // = xz
+    // mirror maps (xz_negz/xz_negx/zx/xy_negy) removed: they reverse clockwise -> wrong side (Felix review)
   }
   let yaw = Math.atan2(hx, hy) * 180 / Math.PI + (tagyawDeg || 0);   // CW from room +y: atan2(x_comp, y_comp)
   yaw = ((yaw + 540) % 360) - 180;                 // normalize to (-180, 180]
@@ -234,6 +232,7 @@ function tagDetect() {
     const pts = mk.corners.map(c => ({ x: c.x - dw / 2, y: dh / 2 - c.y }));
     const p = tagPosit.pose(pts);
     const cp = cameraPoseFromMarker(p.bestRotation, p.bestTranslation, TAG_MAP, TAG_YAW);
+    if (!isFinite(cp.x_m + cp.y_m + cp.yaw_deg)) return;   // POSIT NaN -> skip, don't poison the pose
     tagPoseGood = cp; tagPoseGoodT = now;
     tagPill("TAG " + mk.id + " " + cp.x_m.toFixed(2) + "," + cp.y_m.toFixed(2) +
             " " + cp.yaw_deg.toFixed(0) + "°", true);
@@ -393,8 +392,9 @@ async function start() {
   startVideoTimer();   // begins wearer-video capture if ?video=1 (or when video_ctrl enables it)
   if (TAG) {           // load ArUco + POSIT lazily; own try/catch so a CDN failure can't touch MediaPipe
     try {
-      AR  = (await import(ARUCO_URL)).default;      // AR namespace (Detector, Marker, Dictionary)
-      POS = (await import(POSIT_URL)).default;      // POS namespace (Posit pose estimator)
+      const arM = (await import(ARUCO_URL)).default, posM = (await import(POSIT_URL)).default;
+      AR  = arM.AR  || arM;      // jsDelivr +esm default is { AR } one level down
+      POS = posM.POS || posM;    // ...and { POS }
       tagDetector = new AR.Detector({ dictionaryName: TAG_DICT });
       tagPill("TAG " + TAG_DICT, false);
       startTagTimer();
