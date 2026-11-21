@@ -157,6 +157,9 @@ const ASSOC_DEG = 12;                                        // bearing match, o
 const HEIGHT_M       = parseFloat(qs.get("height_m") || "1.7"); // assumed standing height (m)
 const CAL_M          = parseFloat(qs.get("cal_m")    || "2");   // calibration distance (m)
 const VIS_MIN        = 0.5;   // landmark visibility needed for the full / torso methods
+// noise gate: reject detections that aren't shaped like an upright person (clutter, bags, draped cloth)
+const UPRIGHT_ON = qs.get("upright") !== "0";
+const MIN_ASPECT = parseFloat(qs.get("minaspect") || "1.5");   // box height/width must exceed this (standing person is tall)
 const EYE_ANKLE_FRAC = 0.90;  // eye (or nose) to mid-ankle, fraction of standing height
 const TORSO_FRAC     = 0.30;  // mid-shoulder to mid-hip, fraction of standing height
 const OE_ON          = qs.get("oe") !== "0";                    // ?oe=0: raw, for comparison
@@ -167,7 +170,8 @@ const TRACK_DROP_S   = 0.5;   // forget a person unmatched this long
 const CAL_KEY        = "seeker_f_range_" + NODE_ID;
 
 if (qs.get("cal") === "clear") localStorage.removeItem(CAL_KEY);
-let cal = (() => { try { return JSON.parse(localStorage.getItem(CAL_KEY)); } catch (e) { return null; } })();
+let cal = (() => { try { const c = JSON.parse(localStorage.getItem(CAL_KEY));   // validate shape so a corrupt value can't brick the page
+  return (c && c.f_px > 0 && c.w > 0) ? c : null; } catch (e) { return null; } })();
 // focal length for range: calibrated when available (scaled to this width), else from hfov
 function rangeFocal(W, fFov) { return cal && cal.f_px > 0 && cal.w > 0 ? cal.f_px * W / cal.w : fFov; }
 
@@ -176,6 +180,19 @@ const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 const pxDist = (a, b, W, H) => Math.hypot((a.x - b.x) * W, (a.y - b.y) * H);
 
 // Pixel height of the whole person, and how it was measured: { hpx, src } or null.
+// Does this pose look like an upright human? Rejects squat clutter and scrambled skeletons.
+function isUpright(lms, box) {
+  if (box && box[2] > 0 && box[3] / box[2] < MIN_ASPECT) return false;     // too squat for a standing person
+  const noseY = vis(lms[0]) > 0.3 ? lms[0].y : null;                        // y grows downward
+  const hipY  = (vis(lms[23]) > 0.3 && vis(lms[24]) > 0.3) ? (lms[23].y + lms[24].y) / 2 : null;
+  const shY   = (vis(lms[11]) > 0.3 && vis(lms[12]) > 0.3) ? (lms[11].y + lms[12].y) / 2 : null;
+  const anks  = [lms[27], lms[28]].filter(p => vis(p) > VIS_MIN);
+  const ankY  = anks.length ? Math.max(...anks.map(p => p.y)) : null;
+  if (shY  !== null && hipY !== null && !(shY  < hipY)) return false;       // shoulders above hips
+  if (noseY !== null && hipY !== null && !(noseY < hipY)) return false;     // head above hips
+  if (hipY !== null && ankY !== null && !(hipY < ankY)) return false;       // hips above ankles
+  return true;
+}
 function personHeightPx(lms, box, W, H) {
   const ankles = [lms[27], lms[28]].filter(p => vis(p) > VIS_MIN);
   const eyes = [lms[2], lms[5]].filter(p => vis(p) > VIS_MIN);
@@ -306,6 +323,7 @@ function loop() {
       x0=Math.min(x0,p.x); y0=Math.min(y0,p.y); x1=Math.max(x1,p.x); y1=Math.max(y1,p.y); }
     const box = seen ? [Math.round(x0*W), Math.round(y0*H),
                         Math.round((x1-x0)*W), Math.round((y1-y0)*H)] : null;
+    if (UPRIGHT_ON && !isUpright(lms, box)) continue;       // reject clutter / non-upright shapes
     const ph = personHeightPx(lms, box, W, H);
     raw.push({ bearing_deg, conf, box, ph });
     drawPose(lms, cxN);
