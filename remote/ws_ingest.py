@@ -56,11 +56,10 @@ def ws_handshake(c, key):
 
 
 def serve_static(c, path):
+    path = path.split("?")[0]          # drop query string before matching
     if path in ("/", ""):
         path = "/phone.html"
-    elif path == "/viewer":
-        path = "/viewer.html"
-    fn = os.path.basename(path.split("?")[0])
+    fn = os.path.basename(path)
     full = os.path.join(os.path.dirname(os.path.abspath(__file__)), fn)
     if os.path.isfile(full):
         body = open(full, "rb").read()
@@ -76,19 +75,23 @@ class Bridge:
         self.dst = (fusion_host, fusion_port)
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def emit(self, node_id, pose, contacts):
-        # stamp ids + assemble IF-5.4 remote_contacts
+    def emit(self, node_id, pose, contacts, width, height, hfov_deg):
+        # stamp ids + assemble IF-5.4 remote_contacts (v2). Missing values stay null.
         for i, ct in enumerate(contacts, 1):
             ct.setdefault("id", "%s-%d" % (node_id, i))
             ct.setdefault("cls", "person")
+            ct.setdefault("box", None)
             ct.setdefault("range_m", None)
-        msg = {"type": "remote_contacts", "v": 1, "src": node_id,
-               "t_mono_ms": int(time.monotonic() * 1000), "node_id": node_id,
-               "pose": pose, "contacts": contacts}
+        now_ms = int(time.monotonic() * 1000)   # Pi receive clock (IF-1 clock rule)
+        msg = {"type": "remote_contacts", "v": 2, "src": node_id,
+               "t_mono_ms": now_ms, "ts_ms": now_ms, "node_id": node_id,
+               "pose": pose, "width": width, "height": height, "hfov_deg": hfov_deg,
+               "contacts": contacts}
         self.udp.sendto(json.dumps(msg).encode(), self.dst)
 
     def ws_loop(self, c):
-        node_id, pose = None, {"x_m": 0.0, "y_m": 0.0, "yaw_deg": 0.0}
+        node_id, pose = None, None           # null until the phone gives a measured pose
+        width = height = hfov_deg = None
         n = 0
         while True:
             op, data = ws_recv(c)
@@ -105,18 +108,22 @@ class Bridge:
             if m.get("node_id"):
                 node_id = m["node_id"]
             if isinstance(m.get("pose"), dict):
-                pose = m["pose"]
-            if m.get("role") == "sensor" and "contacts" not in m and "bearing_deg" not in m:
-                LOG("node %s connected pose=%s" % (node_id, pose)); continue
+                pose = m["pose"]            # explicit pose:null leaves the last known value
+            if m.get("width") is not None:
+                width = m["width"]
+            if m.get("height") is not None:
+                height = m["height"]
+            if m.get("hfov_deg") is not None:
+                hfov_deg = m["hfov_deg"]
             if "contacts" in m:
                 contacts = m["contacts"]
             elif "bearing_deg" in m:
-                contacts = [{"conf": m.get("conf", 0.9), "box": m.get("box", [0, 0, 0, 0]),
+                contacts = [{"conf": m.get("conf", 0.9), "box": m.get("box"),
                              "bearing_deg": m["bearing_deg"], "range_m": m.get("range_m")}]
             else:
-                continue
+                LOG("node %s connected pose=%s" % (node_id, pose)); continue
             if node_id:
-                self.emit(node_id, pose, contacts)
+                self.emit(node_id, pose, contacts, width, height, hfov_deg)
                 n += 1
                 if n % 30 == 0:
                     LOG("node %s: forwarded %d msgs" % (node_id, n))

@@ -38,9 +38,9 @@
     <div class="start" id="startWrap"><button id="startBtn">Start sensor</button></div>
   </div>
   <footer>
-    <div class="stat"><div class="k">bearing</div><div class="v" id="sB">—</div></div>
-    <div class="stat"><div class="k">confidence</div><div class="v" id="sC">—</div></div>
-    <div class="stat"><div class="k">fps</div><div class="v" id="sF">—</div></div>
+    <div class="stat"><div class="k">bearing</div><div class="v" id="sB">--</div></div>
+    <div class="stat"><div class="k">confidence</div><div class="v" id="sC">--</div></div>
+    <div class="stat"><div class="k">fps</div><div class="v" id="sF">--</div></div>
   </footer>
 
 <script type="module">
@@ -50,8 +50,9 @@ import { PoseLandmarker, FilesetResolver }
 const qs = new URLSearchParams(location.search);
 const NODE_ID   = qs.get("node") || qs.get("id") || "R1";   // Seeker node id R1/R2
 const HFOV_DEG  = parseFloat(qs.get("hfov") || "66");       // horizontal FOV of the phone camera
-const POSE_RAW  = (qs.get("pose") || "0,0,0").split(",").map(Number);  // taped x_m,y_m,yaw_deg
-const POSE      = {x_m: POSE_RAW[0]||0, y_m: POSE_RAW[1]||0, yaw_deg: POSE_RAW[2]||0};
+// taped pose x_m,y_m,yaw_deg; null (not 0,0,0) when not given, so the Pi can tell "unknown" apart
+const POSE = (() => { const r = qs.get("pose"); if (!r) return null;
+  const a = r.split(",").map(Number); return {x_m: a[0]||0, y_m: a[1]||0, yaw_deg: a[2]||0}; })();
 const WS_URL    = (location.protocol === "https:" ? "wss://" : "ws://") +
                   (qs.get("host") || location.host) + "/ws";
 document.getElementById("who").textContent = "node · " + NODE_ID;
@@ -87,7 +88,7 @@ async function start() {
     baseOptions: { modelAssetPath:
       "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
       delegate: "GPU" },
-    runningMode: "VIDEO", numPoses: 1 });
+    runningMode: "VIDEO", numPoses: 3 });
   connect();
   loop();
 }
@@ -102,32 +103,34 @@ function loop() {
   ctx.clearRect(0,0,ov.width,ov.height);
   frames++; if (now - fpsT > 500) { el("sF").textContent = Math.round(frames*1000/(now-fpsT)); frames=0; fpsT=now; }
 
-  const lms = res.landmarks && res.landmarks[0];
-  if (lms) {
-    const W = ov.width, H = ov.height;
-    // horizontal centre = midpoint of hips (23,24)
-    const cx = (lms[23].x + lms[24].x) / 2;
+  const W = ov.width, H = ov.height;
+  const f = (W / 2) / Math.tan(HFOV_DEG * Math.PI / 360);   // focal length in px from FOV
+  const poses = (res.landmarks && res.landmarks.length) ? res.landmarks : [];
+  const contacts = [];
+  for (const lms of poses) {
+    const cxN = (lms[23].x + lms[24].x) / 2;                // normalized hip midpoint
     const conf = Math.min(1, ((lms[23].visibility||0) + (lms[24].visibility||0)) / 2);
-    const bearing_deg = (cx - 0.5) * HFOV_DEG;             // left -, right + (clockwise from boresight)
-    // bounding box (pixels) from visible landmarks
-    let x0=1,y0=1,x1=0,y1=0;
-    for (const p of lms){ if((p.visibility||0)<0.3) continue;
+    // pinhole bearing: atan((x - cx)/f), right of boresight positive (NOT linear in FOV)
+    const bearing_deg = Math.atan((cxN * W - W / 2) / f) * 180 / Math.PI;
+    // bbox from visible landmarks; null if none pass the visibility threshold
+    let x0=1, y0=1, x1=0, y1=0, seen=false;
+    for (const p of lms) { if ((p.visibility||0) < 0.3) continue; seen = true;
       x0=Math.min(x0,p.x); y0=Math.min(y0,p.y); x1=Math.max(x1,p.x); y1=Math.max(y1,p.y); }
-    const box = [Math.round(x0*W), Math.round(y0*H), Math.round((x1-x0)*W), Math.round((y1-y0)*H)];
-    const f = (W/2)/Math.tan(HFOV_DEG*Math.PI/360);
-    const range_m = box[3]>0 ? Math.round(f*1.7/box[3]*10)/10 : null;   // mono, assume 1.7 m
-    drawPose(lms, cx);
-    el("sB").textContent = bearing_deg.toFixed(1) + "°";
-    el("sC").textContent = conf.toFixed(2);
-    if (wsReady && now - lastSent > 66) {   // ~15 Hz
-      lastSent = now;
-      ws.send(JSON.stringify({ node_id:NODE_ID, bearing_deg, conf, box, range_m }));
-    }
-  } else {
-    el("sB").textContent = "—"; el("sC").textContent = "—";
-    if (wsReady && now - lastSent > 200) {   // liveness: empty contacts keep the node alive
-      lastSent = now; ws.send(JSON.stringify({ node_id:NODE_ID, contacts: [] }));
-    }
+    const box = seen ? [Math.round(x0*W), Math.round(y0*H),
+                        Math.round((x1-x0)*W), Math.round((y1-y0)*H)] : null;
+    const range_m = (box && box[3] > 0) ? Math.round(f * 1.7 / box[3] * 10) / 10 : null;
+    contacts.push({ bearing_deg: Math.round(bearing_deg*10)/10,
+                    conf: Math.round(conf*100)/100, box, range_m });
+    drawPose(lms, cxN);
+  }
+  if (contacts.length) { el("sB").textContent = contacts[0].bearing_deg.toFixed(1) + "deg";
+                         el("sC").textContent = contacts[0].conf.toFixed(2); }
+  else { el("sB").textContent = "-"; el("sC").textContent = "-"; }
+  const interval = contacts.length ? 66 : 200;              // ~15 Hz tracking, 5 Hz liveness
+  if (wsReady && now - lastSent > interval) {
+    lastSent = now;
+    ws.send(JSON.stringify({ type:"phone_detections", v:2, node_id:NODE_ID, pose:POSE,
+                             width:W, height:H, hfov_deg:HFOV_DEG, contacts }));
   }
 }
 

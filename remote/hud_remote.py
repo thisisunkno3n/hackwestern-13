@@ -156,7 +156,7 @@ def main():
     ap.add_argument("--stream", default=None, help="phone IP-cam URL or webcam:IDX")
     ap.add_argument("--source", default=None, help="'stub' for no-camera synthetic mode")
     ap.add_argument("--backend", default="auto", choices=["auto", "stub", "hog", "yolo", "mediapipe"])
-    ap.add_argument("--pose", default="0,0,0", help="node taped pose 'x_m,y_m,yaw_deg' (room frame)")
+    ap.add_argument("--pose", default=None, help="node taped pose 'x_m,y_m,yaw_deg' (room frame); omit for null")
     ap.add_argument("--fov", type=float, default=60.0, help="camera horizontal FOV (deg)")
     ap.add_argument("--focal", type=float, default=None, help="focal length px (overrides --fov)")
     ap.add_argument("--person-height", type=float, default=1.7, dest="ph")
@@ -168,8 +168,10 @@ def main():
     if not args.stream and not args.source:
         args.source = "stub"
 
-    px, py, yaw = [float(v) for v in args.pose.split(",")]
-    pose = {"x_m": px, "y_m": py, "yaw_deg": yaw}
+    pose = None
+    if args.pose:
+        px, py, yaw = [float(v) for v in args.pose.split(",")]
+        pose = {"x_m": px, "y_m": py, "yaw_deg": yaw}
     det = pick_backend(args)
     W, H = det.frame_size()
     f = focal_px(W, args.fov, args.focal)
@@ -186,9 +188,11 @@ def main():
             f = focal_px(W, args.fov, args.focal)
             boxes = det.detect()
             contacts = make_contacts(boxes, W, f, args.ph, args.node)
-            msg = {"type": "remote_contacts", "v": 1, "src": args.node,
-                   "t_mono_ms": t_mono_ms(), "node_id": args.node,
-                   "pose": pose, "contacts": contacts}
+            now_ms = t_mono_ms()
+            msg = {"type": "remote_contacts", "v": 2, "src": args.node,
+                   "t_mono_ms": now_ms, "ts_ms": now_ms, "node_id": args.node,
+                   "pose": pose, "width": W, "height": H, "hfov_deg": args.fov,
+                   "contacts": contacts}
             sock.sendto(json.dumps(msg).encode(), (args.pi, args.port))
             n += 1
             if n % 30 == 0:

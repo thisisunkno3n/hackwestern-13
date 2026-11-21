@@ -17,7 +17,7 @@ def main():
     ap.add_argument("--pi", default="qnxpi-felix.local")
     ap.add_argument("--port", type=int, default=47103)
     ap.add_argument("--node", default="R1")
-    ap.add_argument("--pose", default="0,0,0", help="node taped pose 'x,y,yaw_deg'")
+    ap.add_argument("--pose", default=None, help="node taped pose 'x,y,yaw_deg'; omit for null")
     ap.add_argument("--people", type=int, default=1)
     ap.add_argument("--fov", type=float, default=60.0)
     ap.add_argument("--rate", type=float, default=15.0)
@@ -25,8 +25,10 @@ def main():
     ap.add_argument("--height", type=int, default=720)
     args = ap.parse_args()
 
-    px, py, yaw = [float(v) for v in args.pose.split(",")]
-    pose = {"x_m": px, "y_m": py, "yaw_deg": yaw}
+    pose = None
+    if args.pose:
+        px, py, yaw = [float(v) for v in args.pose.split(",")]
+        pose = {"x_m": px, "y_m": py, "yaw_deg": yaw}
     W, H = args.width, args.height
     f = (W / 2.0) / math.tan(math.radians(args.fov) / 2.0)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -54,9 +56,11 @@ def main():
                     "bearing_deg": round(math.degrees(math.atan((cx - W / 2) / f)), 1),
                     "range_m": round(f * 1.7 / bh, 2),
                 })
-            msg = {"type": "remote_contacts", "v": 1, "src": args.node,
-                   "t_mono_ms": int(now * 1000), "node_id": args.node,
-                   "pose": pose, "contacts": contacts}
+            now_ms = int(now * 1000)
+            msg = {"type": "remote_contacts", "v": 2, "src": args.node,
+                   "t_mono_ms": now_ms, "ts_ms": now_ms, "node_id": args.node,
+                   "pose": pose, "width": W, "height": H, "hfov_deg": args.fov,
+                   "contacts": contacts}
             sock.sendto(json.dumps(msg).encode(), (args.pi, args.port))
             n += 1
             if n % 30 == 0:
