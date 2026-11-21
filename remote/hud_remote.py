@@ -175,7 +175,9 @@ def main():
     det = pick_backend(args)
     W, H = det.frame_size()
     f = focal_px(W, args.fov, args.focal)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ai = socket.getaddrinfo(args.pi, args.port, 0, socket.SOCK_DGRAM)[0]  # IPv4 or IPv6
+    sock = socket.socket(ai[0], socket.SOCK_DGRAM)
+    dst = ai[4]
     LOG("node %s -> %s:%d  source=%s  %dx%d  f=%.1fpx  pose=%s"
         % (args.node, args.pi, args.port, args.source or args.stream, W, H, f, pose))
 
@@ -193,7 +195,7 @@ def main():
                    "t_mono_ms": now_ms, "ts_ms": now_ms, "node_id": args.node,
                    "pose": pose, "width": W, "height": H, "hfov_deg": args.fov,
                    "contacts": contacts}
-            sock.sendto(json.dumps(msg).encode(), (args.pi, args.port))
+            sock.sendto(json.dumps(msg).encode(), dst)
             n += 1
             if n % 30 == 0:
                 LOG("sent %d msgs, last had %d contact(s)" % (n, len(contacts)))
