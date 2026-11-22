@@ -449,7 +449,7 @@ static seeker_ray ray_to(const seeker_pose *p, float x, float y, int with_range,
     float b, r;
     aim(p, x, y, &b, &r);
     seeker_ray ray = { p->x_m, p->y_m, seeker_pose_world_bearing(p, b), with_range, r + range_err,
-                       conf, node };
+                       conf, node, 0 };
     return ray;
 }
 
@@ -549,8 +549,8 @@ static void test_triangulate(void)
     CHECK(NEAR(fx.y_m, 0, 1e-3) && fx.x_m > 0.5f && fx.x_m < 0.75f);
     CHECK(fx.cross_deg < 1 && seeker_tri_consistent(par, 2, &o, &fx));
     /* Weighted by range and confidence: the near, confident range point wins. */
-    par[0] = (seeker_ray){ -2, 0, 90, 1, 2.9f, 1.0f, 0 }; /* says (0.9, 0), confident */
-    par[1] = (seeker_ray){ 2, 0, -90, 1, 2.0f, 0.3f, 1 }; /* says (0, 0), low confidence */
+    par[0] = (seeker_ray){ -2, 0, 90, 1, 2.9f, 1.0f, 0, 0 }; /* says (0.9, 0), confident */
+    par[1] = (seeker_ray){ 2, 0, -90, 1, 2.0f, 0.3f, 1, 0 }; /* says (0, 0), low confidence */
     CHECK(seeker_tri_solve(par, 2, &o, &fx) == SEEKER_TRI_PARALLEL);
     CHECK(fx.x_m > 0.7f && fx.x_m < 0.9f); /* near (0.9, 0), not the midpoint 0.45 */
     /* Parallel bearing-only rays (same direction) have no fix. */
@@ -688,7 +688,7 @@ static seeker_ray noisy_ray(float nx, float ny, float x, float y, float range_fr
 {
     float dx = x - nx, dy = y - ny;
     seeker_ray r = { nx, ny, atan2f(dx, dy) * 57.29578f + bearing_err_deg, with_range,
-                     hypotf(dx, dy) * (1.0f + range_frac_err), 0.9f, node };
+                     hypotf(dx, dy) * (1.0f + range_frac_err), 0.9f, node, 0 };
     return r;
 }
 
