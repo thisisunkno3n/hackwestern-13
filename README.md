@@ -14,7 +14,7 @@ crashed stage while the HUD keeps drawing.
 | `remote/` | Phone side: `phone.html` (the phone sensor page) and `ws_ingest.py` (the WebSocket to UDP ingest, also the fallback bridge). See `remote/README.md`. |
 | `pi/` | QNX 8.0 Raspberry Pi 5 lane in C: fusion (`hud_fusion`), HUD (`hud_display`), supervisor (`seeker_supervisor`), the phone bridge (`scripts/seeker_bridge.py`), configs, scripts, and tests. |
 | `INTERFACES.md` | Contracts between the pieces: message fields, ports, process names, priorities. |
-| `docs/` | Architecture, QNX primer and setup notes, demo script, the all-phone pivot, Devpost outline. |
+| `docs/` | Architecture, QNX primer and setup notes, demo script, the all-phone pivot. |
 | `reference/` | Parts list. |
 | `tools/`, `test_*.py`, `test_*.mjs` | Host tools and tests for the `remote/` side. |
 
