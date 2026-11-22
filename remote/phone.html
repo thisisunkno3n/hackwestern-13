@@ -3,49 +3,183 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>EagleEye sensor</title>
+<meta name="theme-color" content="#0D0E0F">
+<title>Firewatch sensor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- non-blocking: the page renders at once in the fallback fonts if the hotspot has no internet -->
+<link rel="stylesheet" media="print" onload="this.media='all'"
+      href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;500&family=Atkinson+Hyperlegible+Next:wght@400;500;600&display=swap">
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:#07090c; color:#dfe6ef; font:14px/1.4 -apple-system,system-ui,sans-serif;
-         display:flex; flex-direction:column; height:100dvh; overflow:hidden; }
-  header { padding:10px 14px; display:flex; align-items:center; gap:10px; }
-  header b { font-size:15px; letter-spacing:.3px; }
-  .pill { font-size:12px; padding:2px 9px; border-radius:999px; background:#1a2230; }
-  .pill.on { background:#15311f; }
-  .dot { width:8px; height:8px; border-radius:50%; background:#f55; display:inline-block; margin-right:5px; vertical-align:middle; }
-  .dot.on { background:#3ddc84; }
-  .stage { position:relative; flex:1; min-height:0; background:#000; }
+  /* Firewatch drafting language: sharp plates, one 45 degree cut corner (top right), cool colours
+     only (warm colours vanish in fire). Static CSS only: nothing here runs per frame, and the
+     video gets no filters, so the detection loop pays nothing for the look. */
+  :root {
+    color-scheme: dark;
+    --ground:#0D0E0F; --plate:rgba(12,13,14,.84); --line:rgba(244,242,236,.78);
+    --ink:#F4F2EC; --ink2:#A7A59E; --hair:rgba(244,242,236,.2);
+    --cyan:#22E4FF; --green:#3BFF9E; --mag:#FF3DD0;
+    --sans:"Atkinson Hyperlegible Next", -apple-system, system-ui, sans-serif;
+    --mono:"Atkinson Hyperlegible Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --sl:max(10px, env(safe-area-inset-left)); --sr:max(10px, env(safe-area-inset-right));
+    --st:max(10px, env(safe-area-inset-top));  --sb:max(10px, env(safe-area-inset-bottom));
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; position:fixed; inset:0; overflow:hidden; background:var(--ground); color:var(--ink);
+         font:400 14px/1.3 var(--sans); -webkit-text-size-adjust:100%; -webkit-tap-highlight-color:transparent; }
+  button { font:inherit; color:inherit; cursor:pointer; -webkit-appearance:none; appearance:none; }
+
+  /* ---- plate: 1.5 px outline, top-right corner cut at 45 degrees. The border draws three sides,
+     the gradient draws the diagonal (its 0 line passes through the corner at 45 degrees). ---- */
+  .plate { --c:10px; --d:calc(var(--c) * .7071 - 2.12px); position:relative;
+           border:1.5px solid var(--line); border-radius:0;
+           background:linear-gradient(225deg, transparent var(--d), var(--line) var(--d),
+                      var(--line) calc(var(--d) + 1.5px), var(--plate) calc(var(--d) + 1.5px)) padding-box;
+           clip-path:polygon(0 0, calc(100% - var(--c)) 0, 100% var(--c), 100% 100%, 0 100%); }
+  .plate.alert { --line:var(--mag); color:var(--ink);
+                 background:repeating-linear-gradient(135deg, rgba(255,61,208,.16) 0 2px, transparent 2px 7px) padding-box,
+                            linear-gradient(225deg, transparent var(--d), var(--line) var(--d),
+                            var(--line) calc(var(--d) + 1.5px), var(--plate) calc(var(--d) + 1.5px)) padding-box; }
+
+  /* ---- camera stage: full bleed ---- */
+  .stage { position:absolute; inset:0; background:#000; }
   video, canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
   canvas { pointer-events:none; }
-  footer { padding:10px 14px; display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
-  .stat { background:#101722; border:1px solid #1d2635; border-radius:10px; padding:8px 10px; }
-  .stat .k { font-size:11px; opacity:.6; } .stat .v { font-size:18px; font-weight:600; }
-  .start { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
-  .start button { font:600 16px/1 inherit; color:#07090c; background:#3ddc84; border:0;
-                  padding:16px 24px; border-radius:14px; }
+
+  /* ---- HUD layer over the camera: plates hug the edges, the middle stays clear ---- */
+  .hud { position:absolute; inset:0; z-index:1; pointer-events:none; display:flex; flex-direction:column;
+         gap:8px; padding:var(--st) var(--sr) var(--sb) var(--sl); }
+  .hud > * { pointer-events:auto; }
+  .top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+  .chips { display:flex; flex-wrap:wrap; align-items:flex-start; gap:6px; min-width:0; flex:1; }
+  .acts { display:flex; flex-direction:column; align-items:flex-end; gap:6px; flex:none; }
+  .spacer { flex:1; pointer-events:none; }
+
+  .brand { display:flex; align-items:center; gap:8px; min-height:40px; padding:0 20px 0 12px; white-space:nowrap; }
+  .brand b { font-weight:600; font-size:16px; letter-spacing:0; }
+  .brand span { color:var(--ink2); font-size:12px; }
+  .chip { min-height:40px; padding:10px 18px 0 11px; font:500 13px/18px var(--mono); white-space:nowrap; }
+  .chip.ok { --line:var(--cyan); color:var(--cyan); }
+  .chip.bad { --line:var(--mag); color:var(--mag); }
+
+  .btn { --c:10px; min-height:40px; padding:0 20px 0 13px; border:1.5px solid var(--line);
+         font:600 14px/1 var(--sans); white-space:nowrap; text-align:left; }
+  .btn:active { --plate:rgba(244,242,236,.22); }
+  .btn.bad { --line:var(--mag); color:var(--mag); }
+
+  .banner { display:none; padding:9px 18px 10px 11px; max-width:440px; }
+  .banner.show { display:block; }
+  .banner b { display:block; color:var(--mag); font-weight:600; font-size:14px; }
+  .banner span { color:var(--ink); font-size:13px; }
+
+  /* ---- title block: small grey key over a mono value, hairline dividers. Fixed columns
+     (minmax(0,1fr)) so a changing value never resizes the grid. ---- */
+  .tb { --c:12px; padding:0; overflow:hidden; }
+  /* portrait columns sized for their longest values (Link "Offline", Pose "Compass") */
+  .tb-grid { display:grid; grid-template-columns:minmax(0,.8fr) minmax(0,1.35fr) minmax(0,1.15fr) minmax(0,1fr);
+             margin:0 -1px -1px 0; }
+  .cell { padding:5px 8px 6px; border-right:1px solid var(--hair); border-bottom:1px solid var(--hair); min-width:0; }
+  .k { display:block; color:var(--ink2); font-size:11px; line-height:14px; }
+  .v { display:block; font:500 15px/20px var(--mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+       font-variant-numeric:tabular-nums; }
+  .dot { width:8px; height:8px; background:var(--ink2); display:inline-block; margin-right:6px; vertical-align:1px; }
+  .dot.on { background:var(--cyan); }
+  #link.down .dot { background:var(--mag); }
+  #link.down #lstate { color:var(--mag); }
+  #link.up #lstate { color:var(--cyan); }
+
+  @media (orientation:landscape) {
+    .tb-grid { grid-template-columns:minmax(0,.8fr) minmax(0,1.3fr) repeat(6, minmax(0,1fr)); }
+    .tb { align-self:stretch; }
+    .acts { flex-direction:row-reverse; align-items:flex-start; }
+  }
+
+  /* ---- start screen: drawing paper under a title block ---- */
+  .start { position:absolute; inset:0; z-index:2; display:flex; align-items:center; justify-content:center;
+           padding:var(--st) var(--sr) var(--sb) var(--sl);
+           background-color:var(--ground);
+           background-image:linear-gradient(rgba(244,242,236,.07) 1px, transparent 1px),
+                            linear-gradient(90deg, rgba(244,242,236,.07) 1px, transparent 1px),
+                            linear-gradient(rgba(244,242,236,.03) 1px, transparent 1px),
+                            linear-gradient(90deg, rgba(244,242,236,.03) 1px, transparent 1px);
+           background-size:120px 120px, 120px 120px, 24px 24px, 24px 24px;
+           background-position:center; }
+  .card { --c:16px; width:min(340px, 100%); padding:0; }
+  .card-head { padding:16px 26px 14px 16px; border-bottom:1px solid var(--hair); }
+  .card-head h1 { margin:0; font:600 30px/1.05 var(--sans); letter-spacing:0; }
+  .card-head p { margin:4px 0 0; color:var(--ink2); font-size:14px; }
+  .card .tb-grid { grid-template-columns:repeat(4, minmax(0,1fr)); }
+  .card .cell:nth-child(n) { border-bottom:1px solid var(--hair); }
+  .card-foot { padding:14px 16px 16px; display:flex; flex-direction:column; gap:10px; }
+  .go { --c:14px; --plate:var(--ink); --line:var(--ink); width:100%; min-height:54px; padding:0 22px 0 16px;
+        color:var(--ground); font:600 18px/1 var(--sans); text-align:left; }
+  .go:active { --plate:#d9d6cc; --line:#d9d6cc; }
+  .err { display:none; padding:9px 18px 10px 11px; font-size:13px; line-height:1.35; }
+  .err.show { display:block; }
+  .err b { display:block; color:var(--mag); font-size:14px; font-weight:600; margin-bottom:2px; }
+  @media (orientation:landscape) and (max-height:500px) {
+    .card { width:min(560px, 100%); display:grid; grid-template-columns:1fr 1fr; }
+    .card-head { border-bottom:0; border-right:1px solid var(--hair); grid-row:span 2; display:flex;
+                 flex-direction:column; justify-content:center; }
+    .card .tb-grid { grid-template-columns:repeat(2, minmax(0,1fr)); }
+  }
 </style>
 </head>
 <body>
-  <header>
-    <b>EagleEye</b>
-    <span class="pill" id="who">sensor</span>
-    <span class="pill" id="link"><span class="dot" id="ldot"></span><span id="lstate">offline</span></span>
-    <span class="pill" id="hdg" style="display:none">HDG --</span>
-    <span class="pill" id="tag" style="display:none">TAG --</span>
-    <button class="pill" id="zeroBtn" style="display:none;border:0;color:#07090c;background:#ffd23d;font-weight:600">Zero heading</button>
-    <button class="pill" id="calBtn" style="border:0;color:#07090c;background:#7fd4ff;font-weight:600">Calibrate 2 m</button>
-  </header>
   <div class="stage">
     <video id="vid" playsinline muted></video>
     <canvas id="ov"></canvas>
-    <div class="start" id="startWrap"><button id="startBtn">Start sensor</button></div>
   </div>
-  <footer>
-    <div class="stat"><div class="k">bearing</div><div class="v" id="sB">--</div></div>
-    <div class="stat"><div class="k">confidence</div><div class="v" id="sC">--</div></div>
-    <div class="stat"><div class="k">fps</div><div class="v" id="sF">--</div></div>
-  </footer>
+
+  <div class="hud">
+    <div class="top">
+      <div class="chips">
+        <div class="plate brand"><b>Firewatch</b><span>Sensor</span></div>
+        <div class="plate chip" id="hdg" style="display:none">Heading --</div>
+        <div class="plate chip" id="tag" style="display:none">Tag --</div>
+      </div>
+      <div class="acts">
+        <button class="plate btn" id="calBtn">Calibrate 2 m</button>
+        <button class="plate btn" id="zeroBtn" style="display:none">Zero heading</button>
+      </div>
+    </div>
+    <div class="plate alert banner" id="conn" role="alert">
+      <b>Not connected to the Pi</b><span>Check you are on the felix hotspot.</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="plate tb" id="stats">
+      <div class="tb-grid">
+        <div class="cell"><span class="k">Node</span><span class="v" id="who">R1</span></div>
+        <div class="cell"><span class="k">Link</span><span class="v" id="link"><span class="dot" id="ldot"></span><span id="lstate">Waiting</span></span></div>
+        <div class="cell"><span class="k">Fps</span><span class="v" id="sF">-</span></div>
+        <div class="cell"><span class="k">Bearing</span><span class="v" id="sB">-</span></div>
+        <div class="cell"><span class="k">Conf</span><span class="v" id="sC">-</span></div>
+        <div class="cell"><span class="k">Range</span><span class="v" id="sR">-</span></div>
+        <div class="cell"><span class="k">Pose</span><span class="v" id="sP">-</span></div>
+        <div class="cell"><span class="k">Video</span><span class="v" id="sV">Off</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="start" id="startWrap">
+    <div class="plate card">
+      <div class="card-head">
+        <h1>Firewatch</h1>
+        <p>Phone sensor</p>
+      </div>
+      <div class="tb-grid">
+        <div class="cell"><span class="k">Node</span><span class="v" id="iNode">R1</span></div>
+        <div class="cell"><span class="k">Video</span><span class="v" id="iVideo">Off</span></div>
+        <div class="cell"><span class="k">Tag</span><span class="v" id="iTag">Off</span></div>
+        <div class="cell"><span class="k">Compass</span><span class="v" id="iHdg">Off</span></div>
+      </div>
+      <div class="card-foot">
+        <div class="plate alert err" id="startErr" role="alert"><b>Could not start</b><span id="startErrMsg"></span></div>
+        <button class="plate go" id="startBtn">Start camera</button>
+      </div>
+    </div>
+  </div>
 
 <script type="module">
 import { PoseLandmarker, FilesetResolver }
@@ -84,12 +218,22 @@ let tagDetector = null, tagPosit = null, tagCanvas = null, tagCtx = null, tagTim
 let tagPoseGood = null, tagPoseGoodT = -1e9;                          // last good camera pose + its performance.now()
 const WS_URL    = (location.protocol === "https:" ? "wss://" : "ws://") +
                   (qs.get("host") || location.host) + "/ws";
-document.getElementById("who").textContent = "node · " + NODE_ID;
-
 const vid = document.getElementById("vid");
 const ov  = document.getElementById("ov");
 const ctx = ov.getContext("2d");
 const el  = id => document.getElementById(id);
+// change-only text writes with cached nodes: the per-frame stats touch the DOM only when a value
+// actually changes, and the fixed title-block columns mean a change never reflows the layout.
+const _node = {}, _txt = {};
+function setText(id, v) {
+  if (_txt[id] === v) return;
+  _txt[id] = v; (_node[id] || (_node[id] = el(id))).textContent = v;
+}
+setText("who", NODE_ID); setText("iNode", NODE_ID);
+setText("iTag", TAG ? "On" : "Off"); setText("iHdg", HEADING ? "On" : "Off");
+setText("sP", TAG ? "Tag" : HEADING ? "Compass" : POSE ? "Fixed" : "Unknown");
+function showVideo() { const t = videoOn ? "On" : "Off"; setText("sV", t); setText("iVideo", t); }
+showVideo();
 
 // ---- WebSocket link ----
 let ws = null, wsReady = false;
@@ -101,11 +245,18 @@ function connect() {
   ws.onerror = () => { try { ws.close(); } catch(e){} };
   ws.onmessage = (ev) => {   // relay can turn wearer video on/off (IF-5.0 video_ctrl)
     try { const m = JSON.parse(ev.data);
-      if (m.type === "video_ctrl") { videoOn = !!m.stream_video; if (m.fps) VFPS = m.fps; startVideoTimer(); }
+      if (m.type === "video_ctrl") { videoOn = !!m.stream_video; if (m.fps) VFPS = m.fps; startVideoTimer(); showVideo(); }
     } catch (e) {}
   };
 }
-function setLink(on){ el("ldot").classList.toggle("on",on); el("lstate").textContent = on?"live":"offline"; }
+// The "not connected" banner waits CONN_GRACE_MS of continuous downtime, so the 1.5 s reconnect
+// retries don't make it flicker. setLink only runs after start(), never on the start screen.
+const CONN_GRACE_MS = 2500;
+let connTimer = 0;
+function setLink(on){ el("ldot").classList.toggle("on",on); el("lstate").textContent = on?"Live":"Offline";
+  el("link").classList.toggle("up", on); el("link").classList.toggle("down", !on);
+  if (on) { clearTimeout(connTimer); connTimer = 0; el("conn").classList.remove("show"); }
+  else if (!connTimer) connTimer = setTimeout(() => el("conn").classList.add("show"), CONN_GRACE_MS); }
 
 // ---- live compass heading (only when ?heading=1) ----
 function onOrient(e) {
@@ -113,7 +264,7 @@ function onOrient(e) {
   else if (e.absolute !== false && typeof e.alpha === "number") heading = (360 - e.alpha) % 360;
   else return;
   const y = liveYaw();
-  el("hdg").textContent = "HDG " + heading.toFixed(0) + "  YAW " + (y === null ? "NOT ZEROED" : y.toFixed(0));
+  setText("hdg", "Heading " + heading.toFixed(0) + "°, " + (y === null ? "yaw not zeroed" : "yaw " + y.toFixed(0) + "°"));
 }
 function liveYaw() {   // (-180,180], degrees clockwise from room +y; null until zeroed
   if (heading === null || heading0 === null) return null;
@@ -202,8 +353,12 @@ function cameraPoseFromMarker(R, t, tagmap, tagyawDeg) {
            yaw_deg: Math.round(yaw * 10) / 10 };
 }
 
-function tagPill(txt, ok) { const e = el("tag"); if (!e) return;
-  e.style.display = "inline-block"; e.textContent = txt; e.classList.toggle("on", !!ok); }
+// state: "ok" (cyan), "bad" (magenta) or "" (neutral); short goes in the title block's Pose cell.
+function tagPill(txt, state, short) { const e = el("tag"); if (!e) return;
+  if (e.style.display !== "inline-block") e.style.display = "inline-block";
+  setText("tag", txt); setText("sP", short || txt);
+  e.classList.toggle("on", state === "ok"); e.classList.toggle("ok", state === "ok");
+  e.classList.toggle("bad", state === "bad"); }
 
 // One detection pass: draw the live frame downscaled, find the marker, run POSIT -> camera room pose.
 // Own throttle (TAG_HZ) and fully try/catch-wrapped so a bad frame or CDN hiccup never stalls or
@@ -222,7 +377,8 @@ function tagDetect() {
     for (const m of markers) { if (TAG_ID === null || m.id === TAG_ID) { mk = m; break; } }
     const now = performance.now();
     if (!mk) {                                     // no marker this frame: keep last good until it expires
-      tagPill(tagPoseGood && now - tagPoseGoodT <= TAG_HOLD_MS ? "TAG hold" : "TAG LOST", false);
+      if (tagPoseGood && now - tagPoseGoodT <= TAG_HOLD_MS) tagPill("Tag hold", "", "Hold");
+      else tagPill("Tag lost", "bad", "Lost");
       return;
     }
     // focal length in px AT the detection canvas width, from this node's calibrated HFOV (IF-1).
@@ -234,9 +390,9 @@ function tagDetect() {
     const cp = cameraPoseFromMarker(p.bestRotation, p.bestTranslation, TAG_MAP, TAG_YAW);
     if (!isFinite(cp.x_m + cp.y_m + cp.yaw_deg)) return;   // POSIT NaN -> skip, don't poison the pose
     tagPoseGood = cp; tagPoseGoodT = now;
-    tagPill("TAG " + mk.id + " " + cp.x_m.toFixed(2) + "," + cp.y_m.toFixed(2) +
-            " " + cp.yaw_deg.toFixed(0) + "°", true);
-  } catch (e) { tagPill("TAG ERR", false); }
+    tagPill("Tag " + mk.id + " at " + cp.x_m.toFixed(2) + ", " + cp.y_m.toFixed(2) +
+            ", " + cp.yaw_deg.toFixed(0) + "°", "ok", "Tag " + mk.id);
+  } catch (e) { tagPill("Tag error", "bad", "Error"); }
 }
 function startTagTimer() { if (TAG && !tagTimer) tagTimer = setInterval(tagDetect, Math.max(50, 1000 / TAG_HZ)); }
 
@@ -390,9 +546,10 @@ function assoc(raw, t) {
 
 // Calibration: one person at CAL_M, median hpx over 1.5 s.
 let calib = null;
-function showCal() { el("calBtn").textContent = cal ? "f " + cal.f_px.toFixed(0) + " px (" + cal.src + ")" : "Calibrate " + CAL_M + " m"; }
+function showCal() { el("calBtn").classList.remove("bad");
+  el("calBtn").textContent = cal ? "f " + cal.f_px.toFixed(0) + " px, " + cal.src : "Calibrate " + CAL_M + " m"; }
 el("calBtn").onclick = () => { calib = { until: performance.now() + 1500, samples: [], src: null };
-                               el("calBtn").textContent = "Hold still..."; };
+                               el("calBtn").classList.remove("bad"); el("calBtn").textContent = "Hold still"; };
 showCal();
 async function start() {
   el("startWrap").style.display = "none";
@@ -419,9 +576,9 @@ async function start() {
       AR  = arM.AR  || arM;      // jsDelivr +esm default is { AR } one level down
       POS = posM.POS || posM;    // ...and { POS }
       tagDetector = new AR.Detector({ dictionaryName: TAG_DICT });
-      tagPill("TAG " + TAG_DICT, false);
+      tagPill("Tag: looking for " + TAG_DICT, "", "Looking");
       startTagTimer();
-    } catch (e) { tagPill("TAG LOAD FAIL", false); }
+    } catch (e) { tagPill("Tag reader did not load", "bad", "No reader"); }
   }
 }
 
@@ -433,7 +590,7 @@ function loop() {
 
   const res = pose.detectForVideo(vid, now);
   ctx.clearRect(0,0,ov.width,ov.height);
-  frames++; if (now - fpsT > 500) { el("sF").textContent = Math.round(frames*1000/(now-fpsT)); frames=0; fpsT=now; }
+  frames++; if (now - fpsT > 500) { setText("sF", String(Math.round(frames*1000/(now-fpsT)))); frames=0; fpsT=now; }
 
   const W = ov.width, H = ov.height;
   const f = (W / 2) / Math.tan(HFOV_DEG * Math.PI / 360);   // focal length in px from FOV
@@ -483,13 +640,14 @@ function loop() {
         cal = { f_px: CAL_M * s[s.length >> 1] / HEIGHT_M, w: W, src: calib.src };
         localStorage.setItem(CAL_KEY, JSON.stringify(cal));
         showCal();
-      } else el("calBtn").textContent = "Cal failed: need 1 person";
+      } else { el("calBtn").textContent = "Failed: need 1 person"; el("calBtn").classList.add("bad"); }
       calib = null;
     }
   }
-  if (contacts.length) { el("sB").textContent = contacts[0].bearing_deg.toFixed(1) + "deg";
-                         el("sC").textContent = contacts[0].conf.toFixed(2); }
-  else { el("sB").textContent = "-"; el("sC").textContent = "-"; }
+  if (contacts.length) { setText("sB", contacts[0].bearing_deg.toFixed(1) + "°");
+                         setText("sC", contacts[0].conf.toFixed(2));
+                         setText("sR", contacts[0].range_m === null ? "-" : contacts[0].range_m.toFixed(1) + " m"); }
+  else { setText("sB", "-"); setText("sC", "-"); setText("sR", "-"); }
   const interval = (HEADING || TAG) ? 66 : (contacts.length ? 66 : 200);  // >=10 Hz for live heading / moving tag pose
   if (wsReady && now - lastSent > interval) {
     lastSent = now;
@@ -498,16 +656,43 @@ function loop() {
   }
 }
 
+// Seen-person cyan with a dark halo (cool colours stay visible in fire; the halo keeps them
+// readable on bright frames). Batched: one path per colour instead of one fill per landmark,
+// and no shadowBlur, so this is cheaper than the old per-dot fills.
+const SEEN = "#22E4FF", HALO = "rgba(5,6,7,.72)";
 function drawPose(lms, cx) {
-  const W = ov.width, H = ov.height;
-  ctx.fillStyle = "#3ddc84";
-  for (const p of lms) { ctx.beginPath(); ctx.arc(p.x*W, p.y*H, 4, 0, 7); ctx.fill(); }
-  ctx.strokeStyle = "#ffd23d"; ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.moveTo(cx*W, 0); ctx.lineTo(cx*W, H); ctx.stroke();  // bearing line
+  const W = ov.width, H = ov.height, x = cx * W;
+  ctx.lineCap = "butt";
+  ctx.strokeStyle = HALO; ctx.lineWidth = 6;                                 // bearing line halo
+  ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  ctx.strokeStyle = SEEN; ctx.lineWidth = 2;                                 // bearing line
+  ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  ctx.fillStyle = HALO; ctx.beginPath();                                     // landmark halos
+  for (const p of lms) { ctx.moveTo(p.x*W + 6, p.y*H); ctx.arc(p.x*W, p.y*H, 6, 0, 7); }
+  ctx.fill();
+  ctx.fillStyle = SEEN; ctx.beginPath();                                     // landmark dots
+  for (const p of lms) { ctx.moveTo(p.x*W + 3.5, p.y*H); ctx.arc(p.x*W, p.y*H, 3.5, 0, 7); }
+  ctx.fill();
 }
 
+// Plain-words start errors on the start screen (magenta), in place of a blocking alert().
+function startErrorText(e) {
+  const msg = (e && e.message) || String(e);
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+    return "The camera only works on the secure page. Open the https address of the Pi.";
+  if (/compass permission/.test(msg))
+    return "Compass access was denied. Allow motion and orientation, then tap Start camera again.";
+  if (e && e.name === "NotAllowedError")
+    return "Camera access was blocked. Allow the camera for this page, then tap Start camera again.";
+  if (e && (e.name === "NotFoundError" || e.name === "OverconstrainedError"))
+    return "No camera was found on this phone.";
+  if (e && e.name === "NotReadableError")
+    return "The camera is busy. Close other apps using it, then try again.";
+  return "The camera or the pose model failed to load (" + msg + "). Check the connection and try again.";
+}
+// startHeading() stays the first call in the tap: iOS only grants the compass prompt inside the gesture.
 el("startBtn").onclick = () => startHeading().then(start).catch(e => { el("startWrap").style.display="flex";
-  alert("camera/model error: " + e.message); });
+  el("startErrMsg").textContent = startErrorText(e); el("startErr").classList.add("show"); });
 </script>
 </body>
 </html>

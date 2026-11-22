@@ -1,4 +1,4 @@
-# remote/ -- phones as the vision sensors (all-phone pivot)
+# Firewatch remote/ -- phones as the vision sensors (all-phone pivot)
 
 Per `PIVOT-all-phone.md` (context repo): **no webcams**. Two phones run person detection in the
 browser (MediaPipe) and stream detections into the RTOS. Browsers can't send UDP, so a small
@@ -9,8 +9,14 @@ phone.html (getUserMedia -> MediaPipe pose)  --WS/WSS-->  ws_ingest.py  --UDP re
 ```
 
 ## Files
-- `phone.html` -- the phone sensor page. URL params: `?node=R1&pose=x,y,yaw&hfov=66`. Sends
+- `phone.html` -- the Firewatch phone sensor page. URL params: `?node=R1&pose=x,y,yaw&hfov=66`. Sends
   `{node_id, bearing_deg, conf, box, range_m}` at ~15 Hz, empty-contacts liveness when no one is seen.
+  Styled to match the Firewatch HUD (drafting plates, one cut corner, cool colours only): a start
+  screen with a "Start camera" button, the camera full screen, and a title block along the bottom
+  (node, link, fps, bearing, conf, range, pose or tag state, video). A magenta banner appears when
+  the Pi link has been down for 2.5 s; camera or permission problems show in plain words on the
+  start screen. Fonts (Atkinson Hyperlegible Next and Mono) load from Google Fonts without blocking,
+  with system fallbacks. Single file: copy it as is to the Pi (`~/seeker/remote/phone.html`).
 - `ws_ingest.py` -- WS/WSS→UDP bridge; also serves `phone.html`. `--fusion <pi> --fusion-port 47103`.
 - `hud_remote.py` -- *alternative* Mac-relay path (OpenCV on a phone IP-cam). Kept for the Cubie
   fallback / non-browser phones; the in-browser path above is primary post-pivot.
