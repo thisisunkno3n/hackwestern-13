@@ -90,7 +90,7 @@
   #link.up #lstate { color:var(--cyan); }
 
   @media (orientation:landscape) {
-    .tb-grid { grid-template-columns:repeat(8, minmax(0,1fr)); }
+    .tb-grid { grid-template-columns:minmax(0,.8fr) minmax(0,1.3fr) repeat(6, minmax(0,1fr)); }
     .tb { align-self:stretch; }
     .acts { flex-direction:row-reverse; align-items:flex-start; }
   }
