@@ -91,6 +91,10 @@ typedef struct {
     seeker_colour c;  /* range from the wearer, with hysteresis (seeker_colour.h) */
     int box_valid;    /* eased screen box (WV_BOX_EASE), snapped on a jump */
     float bx, by, bw, bh;
+    int box_own;      /* that box was one the wearer's phone measured (its own detection box) */
+    int own_valid;    /* own: the last box the wearer's phone measured for this person (screen */
+    int own[4];       /* px, x y w h) at own_ms: where a person held as seen stays drawn */
+    int64_t own_ms;
     int shown;        /* drawn before: a change of look crossfades */
     int shown_direct; /* drawn as seen (with the WV_SEEN_HOLD_MS hold) */
     int64_t direct_ms, xfade_ms; /* last frame the wearer's phone saw them; start of the crossfade */
@@ -103,7 +107,9 @@ typedef struct {
 
 /* Handoff between x-ray and seen (wv_config.handoff). The wearer's phone misses a person now and
  * then (a frame under its confidence cut, a hand at a wall edge): a person seen stays seen for
- * WV_SEEN_HOLD_MS, so the look does not flip at the phone's frame rate. A change of look
+ * WV_SEEN_HOLD_MS, so the look does not flip at the phone's frame rate, in the last box that
+ * phone measured (not where the fused position projects), and the first box it measures after an
+ * x-ray look is drawn at once, not eased from the ghost's place. A change of look
  * (x-ray ghost to seen box or back) crossfades over WV_XFADE_MS in the plan theme, both drawn in
  * the same eased box. */
 #define WV_SEEN_HOLD_MS 400

@@ -207,6 +207,8 @@ typedef struct {
     float ho_x, ho_y;   /* handoff blend: offset from the new fix, decaying from ho_ms */
     int64_t ho_ms;
     long handoffs;      /* node set changes this track lived through (logs, tests) */
+    int ranged_whole;   /* placed at least once from more than a lone partial sighting */
+    int part_fix;       /* the last fix was another phone's lone partial sighting, by bearing */
 } seeker_fusion_mem;
 
 /* Handoff between phones (an R2-only x-ray person R1 starts to see, or the other way round).
@@ -246,11 +248,19 @@ typedef struct {
  *     joints under SEEKER_OCCL_FRAG_VIS are not taken, nor are joints placed on or past the
  *     frame's edge from any view: they are held, then hidden (seeker_skel.h).
  *   - The wearer's lone partial sighting continues a track on its bearing at the distance of the
- *     track's last fix, not one moved on by its velocity: no walking on into the wall. */
+ *     track's last fix, not one moved on by its velocity: no walking on into the wall.
+ *   - Another phone's lone partial sighting (R2 sees a head and an arm of someone who just walked
+ *     behind the wall) does the same for a track that was already ranged from a whole body
+ *     (part_keep; hud_fusion --no-part-keep): its box-height range is the visible part's, about
+ *     twice too far, which threw the ghost 2 m along that phone's ray and drew its few joints
+ *     twice the size until the phone saw the whole person. A track that was never ranged whole
+ *     keeps the part's range, as before (there is nothing better). */
 #define SEEKER_OCCL_HOLD_MS 1000
 #define SEEKER_OCCL_BEARING_DEG 8.0f
 #define SEEKER_OCCL_WHOLE_N 3
 #define SEEKER_OCCL_FRAG_VIS 0.5f
+#define SEEKER_OCCL_PART_COST 4.0 /* assignment cost (sigmas squared) added to another phone's
+                                   * lone partial sighting continuing a track by bearing */
 
 #define SEEKER_FUSION_MEM 32
 
@@ -277,6 +287,9 @@ typedef struct {
                        * (hud_fusion --no-crouch-range) */
     int occl_guard;  /* 1 (init default), with handoff: a person cut by a wall or the frame edge
                       * (SEEKER_OCCL_*); 0 is the old code (hud_fusion --no-occl-guard) */
+    int part_keep;   /* 1 (init default), with occl_guard: another phone's lone partial sighting
+                      * keeps the distance of a track already ranged whole (hud_fusion
+                      * --no-part-keep: its own part-size range, the old code) */
     int n_tags;    /* room poses of tags other than 0 (hud_fusion --tag-pose) */
     seeker_fusion_tag tags[SEEKER_MAX_TAGS];
     seeker_tri_opts tri; /* triangulation tuning; init copies assoc_m and the fusion.tri_* keys */

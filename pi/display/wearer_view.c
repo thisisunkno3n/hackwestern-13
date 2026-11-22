@@ -424,6 +424,7 @@ typedef struct {
     anim_fx fx;     /* plan: this person's alert animation (anim_alert.h), zero = none */
     int cur_slot;   /* plan: wv_view.colours slot of the person being labelled, -1 none */
     ap_fx pfx;      /* plan: the person being drawn's animation (anim_person.h), 0 = none */
+    int64_t now;    /* the frame's one timestamp (ms) */
 } rc;
 
 static int clampi(int v, int lo, int hi)
@@ -561,10 +562,19 @@ static void learn_tilt(wv_view *v, const wv_camera *cam, const seeker_tracks *t,
     }
 }
 
-static void item_box(const rc *r, const wv_item *it, const seeker_track *k, int *x, int *y, int *w,
-                     int *h)
+/* The box of a person in the wearer's picture. A person the wearer's phone sees is drawn in that
+ * phone's own detection box: it is measured in this very picture, where the fused room position
+ * projected back into it carries every range and pose error (most of all just after someone
+ * steps out from behind a wall, when the track still sits where the other phone ranged it). A
+ * person held as seen through WV_SEEN_HOLD_MS (the wearer's phone missed them this frame) stays
+ * in the last such box. Anyone else is drawn where their room position projects. Returns 1 for a
+ * box the wearer's phone measured (this frame's, or the held one). */
+static int item_box(const rc *r, const wv_item *it, const seeker_track *k, int *x, int *y, int *w,
+                    int *h)
 {
     const wv_camera *cc = &r->cam;
+    wv_colour_slot *slot = it->slot >= 0 && r->view ? &r->view->colours[it->slot] : NULL;
+    int own = 0;
     if (it->direct && k->has_node_box && !strcmp(k->node_id, r->w->node) && cc->image_w > 0 &&
         cc->image_h > 0 && k->node_box[2] > 0 && k->node_box[3] > 0 &&
         k->node_box[0] + k->node_box[2] <= cc->image_w * 1.05f &&
@@ -574,6 +584,15 @@ static void item_box(const rc *r, const wv_item *it, const seeker_track *k, int 
         *y = r->vp.y + (int)lroundf(k->node_box[1] * sy);
         *w = (int)lroundf(k->node_box[2] * sx);
         *h = (int)lroundf(k->node_box[3] * sy);
+        own = 1;
+        if (slot) {
+            slot->own_valid = 1;
+            slot->own_ms = r->now;
+            slot->own[0] = *x, slot->own[1] = *y, slot->own[2] = *w, slot->own[3] = *h;
+        }
+    } else if (it->direct && it->held && slot && slot->own_valid && r->now - slot->own_ms <= WV_SEEN_HOLD_MS) {
+        *x = slot->own[0], *y = slot->own[1], *w = slot->own[2], *h = slot->own[3];
+        own = 1;
     } else if (it->has_proj) {
         *x = to_sx(r, it->p.box_x);
         *y = to_sy(r, it->p.box_y);
@@ -602,6 +621,7 @@ static void item_box(const rc *r, const wv_item *it, const seeker_track *k, int 
     *y = clampi(*y, r->vp.y - 4, r->vp.y + r->vp.h + 4);
     *w = x1 - *x;
     *h = y1 - *y;
+    return own;
 }
 
 static int overlaps(const int *a, int x, int y, int w, int h)
@@ -729,15 +749,21 @@ static int draw_skeleton(rc *r, const wv_item *it, const seeker_track *k, uint32
 }
 
 /* WV_BOX_EASE: the drawn box glides toward this frame's box; a big jump (another detection, a
- * track that moved far) snaps so it never slides across the screen. */
-static void ease_box(rc *r, const wv_item *it, int *x, int *y, int *w, int *h)
+ * track that moved far) snaps so it never slides across the screen. So does the first box the
+ * wearer's phone measured itself (own, item_box) after a projected one: easing there from where
+ * the x-ray ghost stood drew the seen frame beside the person for the first frames. */
+static void ease_box(rc *r, const wv_item *it, int own, int *x, int *y, int *w, int *h)
 {
-    if (it->slot < 0 || !r->view || r->view->box_ease_off)
+    if (it->slot < 0 || !r->view)
         return;
     wv_colour_slot *s = &r->view->colours[it->slot];
+    int first_own = own && !s->box_own && r->w->handoff;
+    s->box_own = own;
+    if (r->view->box_ease_off)
+        return;
     float jump = hypotf((float)*x + *w * 0.5f - (s->bx + s->bw * 0.5f),
                         (float)*y + *h * 0.5f - (s->by + s->bh * 0.5f));
-    if (!s->box_valid || jump > WV_BOX_SNAP * (float)(*h > 1 ? *h : 1)) {
+    if (!s->box_valid || first_own || jump > WV_BOX_SNAP * (float)(*h > 1 ? *h : 1)) {
         s->bx = (float)*x, s->by = (float)*y, s->bw = (float)*w, s->bh = (float)*h;
         s->box_valid = 1;
     } else {
@@ -753,8 +779,8 @@ static void ease_box(rc *r, const wv_item *it, int *x, int *y, int *w, int *h)
 static void draw_in_view(rc *r, const wv_item *it, const seeker_track *k)
 {
     int x, y, w, h;
-    item_box(r, it, k, &x, &y, &w, &h);
-    ease_box(r, it, &x, &y, &w, &h);
+    int own = item_box(r, it, k, &x, &y, &w, &h);
+    ease_box(r, it, own, &x, &y, &w, &h);
     char rs[16], via[40];
     range_str(rs, sizeof rs, it);
     int cx = x + w / 2, gap = 6 + 2 * r->ts;
@@ -1103,8 +1129,8 @@ static void p_tag(rc *r, int bx, int by, int bw, float lead_dy, float dx, float 
 static void p_box(rc *r, const wv_item *it, const seeker_track *k, int b[4], int raw[4])
 {
     int x, y, w, h;
-    item_box(r, it, k, &x, &y, &w, &h);
-    ease_box(r, it, &x, &y, &w, &h);
+    int own = item_box(r, it, k, &x, &y, &w, &h);
+    ease_box(r, it, own, &x, &y, &w, &h);
     raw[0] = x, raw[1] = y, raw[2] = w, raw[3] = h;
     int bottom = r->c->h - P(r, 8);
     if (y + h > bottom)
@@ -1690,6 +1716,7 @@ void wv_render(canvas *c, const seeker_config *cfg, wv_view *v, const seeker_tra
         learn_tilt(v, &r.cam, t, items, n);
     int64_t now = v->clock_ms ? v->clock_ms : seeker_now_ms(); /* the frame's one timestamp */
     assign_levels(v, cfg, t, items, n, now);
+    r.now = now;
     if (r.plan) {
         anim_person_begin(now, r.u);
         wv_plan(&r, v, t, items, n, &pose, s, use_video, other_node, video);

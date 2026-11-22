@@ -577,6 +577,14 @@ distance label, colour and plan mark carry on.
   the phone's frame rate. Fusion keeps what the two-phone fix taught about each phone's range, so
   the ghost does not jump back by R2's error when R1 loses them (it fades back to the phone's own
   range over a few seconds).
+- **The seen frame is R1's own box.** R1's detection box is measured in the picture the HUD
+  shows, so it is where the person is. Before, the first seen frames after an x-ray look were
+  eased over from where the ghost stood (the fused position, off by R2's range error: up to a
+  quarter of a box height beside the person, more with a far R2), and a person held as seen
+  through a frame R1 missed was drawn where the fused position projects (a third of a box
+  height off in place or size, pumping at every missed frame). Now the first box R1 measures
+  after an x-ray look is drawn at once, and a held person stays in R1's last box until R1 sees
+  them again or the 400 ms run out. `HUD_ARGS="--handoff off"` is the old behaviour.
 
 Host replay (`build/test_handoff`, ctest `handoff`; before = old code on the same seed):
 
@@ -586,6 +594,8 @@ Host replay (`build/test_handoff`, ctest `handoff`; before = old code on the sam
 | Step out, R2 loses them | 0.50 m error (R2's range reused on R1's ray) | 0.06 m |
 | Step out, far R2 (30% long) | 2 ids, 1.98 m jump, 7 look changes | 1 id, glide (0.62 m first tick), 1 look change |
 | Hand out | 2 people for 37 ticks, drawn SEEN 54 frames, ghost 0.40 m off | 1 x-ray person, 0.23 m off |
+| First seen frame against R1's box (main before this fix) | 0.12 box heights off, 0.26 with the far R2 | 0.00 |
+| Held seen frame against R1's last box (main before this fix) | 0.36 box heights off | 0.01 |
 | R1 sees only a hand, nobody else | a person 2.3 m off | nothing |
 
 Logs: `hud_fusion.log` starts with `handoff: partial contacts by bearing ...`; with `--debug`,
@@ -636,6 +646,43 @@ grep -c 'occl: whole sighting' ~/seeker-logs/hud_fusion.log
 ```
 
 `FUSION_ARGS=--no-occl-guard sh scripts/run-live.sh` is the old behaviour, to compare.
+
+### The ghost that flew off as a '<' when someone walked behind the wall
+
+With R2 covering only the space behind the wall, R2's first sightings of someone walking in are
+of a part of them (a head, a shoulder and an arm past the wall's end or the frame's edge). The
+phone ranges such a contact from the box of the visible landmarks, which reads about twice too
+far. For R1 that was already handled (a partial contact counts by bearing only); a lone partial
+contact from R2 was taken at its range. The track R1 had just lost was matched to it (the gate
+is long along a one-phone ray), so the person glided about 2 m on along R2's ray in a third of
+a second, the held seen frame went with them, and the ghost that faded in was those few joints
+(an angle of head, shoulder and arm: the '<') scaled by the wrong distance to twice the size.
+When R2 saw the whole person it all came back over about a second. Now (`part_keep`, on with
+the occlusion guard):
+
+- Another phone's lone partial sighting of a person who was already ranged from a whole body
+  keeps their distance: they are placed on that phone's bearing at the track's distance, as
+  R1's partial sightings are. The skeleton is scaled by that distance.
+- When that phone then sees the whole person, the difference (they may have walked on along its
+  ray meanwhile) glides in over 350 ms like a change of phone.
+- A person only ever seen in part by R2 is still placed at the part's range (nothing better is
+  known).
+- The held seen frame stays in R1's last box (above), so nothing cyan moves behind the wall.
+
+Host replay (ctest `handoff`, scene "walk-in, R2 part first"; before = `--no-part-keep`):
+
+| | Before | After |
+| --- | --- | --- |
+| Farthest from the person in the 1.5 s after R2 picks them up | 2.29 m | 0.69 m |
+| Largest step in one 33 ms tick | 0.75 m | 0.37 m |
+| Tallest ghost drawn (a body is 0.93) | 1.81 person heights | 1.14 |
+| Held seen frame against R1's last box | 0.80 box heights off (main) | 0.01 |
+
+What is left: while R2 sees only a part, the distance along R2's ray is not measured, so a
+person walking away from R2 lags (up to 0.85 m in the replay, where the walk is nearly along
+R2's ray) until R2 sees them whole. `hud_fusion.log` starts with `part keep: ...`;
+`FUSION_ARGS=--no-part-keep sh scripts/run-live.sh` is the old behaviour, to compare, and
+`FUSION_ARGS=--debug` logs `track N handoff to R2: X m from where it was` when R2 takes over.
 
 ## Morrissette calibration (tag 0 only, both phones fixed)
 
