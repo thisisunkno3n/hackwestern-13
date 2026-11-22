@@ -36,7 +36,7 @@
  * contacts by bearing, covariance track gate, glide on a node set change, learned range ratios)
  * and runs the old track identity code.
  * --no-crouch-range takes a crouched person's eye-to-ankle range as the phone sent it, instead
- * of with the crouch height (seeker_fusion.h SEEKER_CROUCH_EYE_ANKLE_FRAC).
+ * of with the crouch height measured against their own body (seeker_fusion.h SEEKER_CROUCH_*).
  * --no-occl-guard turns off the occlusion guard (seeker_fusion.h SEEKER_OCCL_*: a whole sighting
  * near where the same phone just saw part of someone held partial, skeleton joints off the frame or
  * guessed in a partial view not taken, confirmed joint jumps, no glide from where an unseen person
@@ -503,9 +503,9 @@ int main(int argc, char **argv)
         seeker_log("handoff: off (--no-handoff), old track identity");
     if (fus.crouch_range)
         seeker_log("crouch range: a crouched contact's eye-to-ankle range is taken with the crouch "
-                   "height, x%.2f (%.2f over %.2f of standing; --no-crouch-range: as sent)",
-                   SEEKER_CROUCH_EYE_ANKLE_FRAC / SEEKER_STAND_EYE_ANKLE_FRAC,
-                   SEEKER_CROUCH_EYE_ANKLE_FRAC, SEEKER_STAND_EYE_ANKLE_FRAC);
+                   "height, measured against the person's own legs, torso and shoulders (x%.2f to x1; "
+                   "--no-crouch-range: as sent)",
+                   SEEKER_CROUCH_EYE_ANKLE_MIN / SEEKER_STAND_EYE_ANKLE_FRAC);
     else
         seeker_log("crouch range: off (--no-crouch-range), ranges as the phones sent them");
     if (fus.occl_guard)

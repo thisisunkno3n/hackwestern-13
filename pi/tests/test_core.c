@@ -5388,7 +5388,10 @@ static void test_crouch_range(void)
             CHECK(kept[i] == sent[i]);
     }
     CHECK(sent[1] > 3.4f);                                /* the bug: about 1.5x long */
-    CHECK(fabsf(kept[1] - 2.5f) < 0.3f && NEAR(kept[1], sent[1] * 0.58f / 0.90f, 1e-3));
+    /* the factor is the height the phone measured over the standing one, from the person's own
+     * body in the picture (here the shoulder line, 0.24 of the standing height) */
+    CHECK(fabsf(kept[1] - 2.5f) < 0.3f && kept[1] > sent[1] * SEEKER_CROUCH_EYE_ANKLE_MIN / 0.90f &&
+          kept[1] < sent[1] * 0.8f);
     CHECK(f.nodes[0].crouch_ranges == 1);
     /* --no-crouch-range: as the phone sent it */
     seeker_fusion_init(&f, &cfg);

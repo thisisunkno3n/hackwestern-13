@@ -94,6 +94,8 @@ typedef struct {
     int shown;        /* drawn before: a change of look crossfades */
     int shown_direct; /* drawn as seen (with the WV_SEEN_HOLD_MS hold) */
     int64_t direct_ms, xfade_ms; /* last frame the wearer's phone saw them; start of the crossfade */
+    float wbox[4];    /* the wearer phone's own last box of them (its image px) and when: drawn */
+    int64_t wbox_ms;  /* while they stay seen without one (WV_SEEN_BOX_HOLD_MS) */
     int plate_valid;  /* plan theme, animations on: where this person's plate was drawn, so a plate */
     float plate_x, plate_y; /* that has to move (layout changed) glides there instead of jumping */
     int ghost_valid;  /* plan theme: the x-ray ghost last drawn, so the one fading out in a */
@@ -108,6 +110,24 @@ typedef struct {
  * the same eased box. */
 #define WV_SEEN_HOLD_MS 400
 #define WV_XFADE_MS 250
+/* A seen person's box is the wearer phone's own detection box. In a frame without one (the hold
+ * above, or another phone leading the track) the last one stays for WV_SEEN_BOX_HOLD_MS instead
+ * of a projected standing-person box (0.5 m wide, floor to 1.75 m: tall and narrow on a crouched
+ * person). Past that, the projected box of a seen person whose posture is CROUCH keeps its width
+ * and gets WV_CROUCH_BOX_H of its height, up from the floor. */
+#define WV_SEEN_BOX_HOLD_MS 500
+#define WV_CROUCH_BOX_H 0.6f
+
+/* Duplicate check by ray (wv_classify same_on_ray, with handoff on): another phone's
+ * single-phone track is the seen person d when that phone's ray crosses the wearer's line to d
+ * (the lines at least WV_DUP_CROSS_DEG apart) at a point where both ranges read
+ * WV_DUP_RANGE_LO to WV_DUP_RANGE_HI times the distance and one of them within
+ * WV_DUP_RANGE_OK (a size range reads up to 2x long on a crouched or cut-off person, rarely
+ * short). */
+#define WV_DUP_RANGE_LO 0.8f
+#define WV_DUP_RANGE_OK 1.3f
+#define WV_DUP_RANGE_HI 2.2f
+#define WV_DUP_CROSS_DEG 10.0f
 
 /* Drawn boxes move this fraction of the way to the new box each frame (30 fps: about 50 ms of
  * lag), so detection-box noise and 15 Hz steps do not shake the overlay; a jump larger than

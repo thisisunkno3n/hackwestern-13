@@ -729,15 +729,28 @@ phone's frame, with a real shin (MediaPipe invents hidden legs and often folds t
   of the camera's view (a person lying 3 m away usually is).
 - STAND: one straight, vertical leg (knee over 150 deg) and the torso upright. One is enough: on a
   staircase the other foot is a step or two up with its knee bent.
-- CROUCH: BOTH legs folded (knee under 120 deg, or the knee less than 0.45 torso lengths below
-  the hip): squatting, kneeling, sitting. One folded leg with the other hidden is no evidence (the
-  upper leg on a stair looks the same): the label stays as it was.
+- CROUCH: BOTH legs folded: squatting, kneeling, sitting. A leg is folded when its knee is under
+  120 deg, or the knee is less than 0.45 torso lengths below the hip, or the leg is short: hip to
+  ankle under 0.41 of the body height in the picture, with the knee under 0.75 torso lengths below
+  the hip. The body height comes from whatever the view shortens least (thigh or shin side on, the
+  torso, the shoulder line facing the phone). The short-leg test is what catches a crouch facing
+  the phone from chest height: there the knees point at the camera, the 2D knee angle stays near
+  160 deg and the forward lean shortens the torso, so the first two tests only fired with the hips
+  almost on the floor (0.36 m up; now 0.6 m). One folded leg with the other hidden is no evidence
+  (the upper leg on a stair looks the same): the label stays as it was. Side on with only the far
+  ankle hidden behind the near leg, the far thigh still counts (knee under 0.7 of a leg segment
+  below the hip).
 - UNKNOWN: no torso, or no full leg (ankles hidden by a wall, desk or stair, or below the frame).
   No guess.
-- Stable: a new label needs 7 of the last 10 skeletons (about 0.5 s at 15 Hz), UNKNOWN 12 of the
-  last 15 (about 1 s), and each label stays at least 0.5 s. Host tests: stand to crouch in about
-  0.5 s, 0 changes in 10 s of a noisy standing person, 12 s of stair climbing (every other step
-  with the lower leg hidden) stays STAND with 0 crouch labels, a 0.2 s crouch glitch never flips.
+- Stable: a new label needs 6 of the last 9 skeletons (about 0.4 s at 15 Hz), UNKNOWN 12 of the
+  last 15 (about 1 s), and each label stays at least 0.5 s. The votes read each message's own
+  joints, not the smoothed ghost (its One Euro filter trails a crouch by 0.3 to 0.5 s). Host tests:
+  stand to crouch in about 0.4 s, 0 changes in 10 s of a noisy standing person, 12 s of stair
+  climbing (every other step with the lower leg hidden) stays STAND with 0 crouch labels, a 0.2 s
+  crouch glitch never flips. `test_crouch` (ctest `crouch`) replays a jointed 3D person through
+  both phones' cameras: an ordinary crouch (hips 0.59 m up) facing R1 never read CROUCH before
+  and reads it 0.2 to 0.5 s after the person is down now; walking, stair steps and bending over
+  stay STAND.
 - Logs: `hud_fusion.log` prints the settings at start (`posture: legs need ...`) and each change,
   e.g. `track 3 R2 posture stand -> crouch (2 deg torso, legs: L knee 90 deg thigh drop 0.09 len
   0.35 R knee 85 deg thigh drop 0.12 len 0.44)`; `L hidden` is a leg that did not count.
@@ -750,31 +763,44 @@ phone's frame, with a real shin (MediaPipe invents hidden legs and often folds t
   | `SEEKER_POSTURE_LEG_VIS` | `0.5` | hidden legs still count (raise to `0.6`), or real legs drop out and everyone reads UNKNOWN (lower to `0.4`) |
   | `SEEKER_POSTURE_CROUCH_KNEE` | `120` | real crouches are missed (raise to `130`) |
   | `SEEKER_POSTURE_CROUCH_THIGH` | `0.45` | sitting facing the phone is missed (raise to `0.55`) |
+  | `SEEKER_POSTURE_CROUCH_LEG` | `0.41` | a crouch facing the phone is still read late (raise to `0.43`), or standing people read CROUCH (lower to `0.38`; `0` turns the short-leg test off) |
   | `SEEKER_POSTURE_STAND_KNEE` | `150` | standing people stay UNKNOWN (lower to `140`) |
   | `SEEKER_POSTURE_STAND_THIGH` | `0.6` | the same, with the thigh short in the picture (phone far above or below) |
   | `SEEKER_POSTURE_ONE_LEG` | `0` | `1`: a single deeply folded leg (knee under 100 deg, thigh level) is enough for CROUCH, for side views where the far leg is hidden. Risk: a big stair step |
-  | `SEEKER_POSTURE_VOTES` | `7/10` | `5/10` for a faster label, `9/12` for a steadier one |
+  | `SEEKER_POSTURE_VOTES` | `6/9` | `5/8` for a faster label, `9/12` for a steadier one |
 
   ```sh
   SEEKER_POSTURE_LEG_VIS=0.6 SEEKER_POSTURE_VOTES=8/12 sh scripts/run-live.sh
   ```
 - Phone side: `phone.html` drops detections whose box is less than 1.5 times taller than wide
-  (`isUpright`), and a deep squat or a side-on sitter is often wider than that, so the person
-  blinks out instead of reading CROUCH. Add `&minaspect=1.0` to that phone's link (typed by hand)
-  if crouching people vanish.
+  (`isUpright`, `?minaspect`). A crouched person is about as wide as tall, so the wearer's phone
+  dropped them: the HUD lost R1's own box and drew a held or projected one, or R2's x-ray ghost.
+  A pose that shows a body (shoulders, hips and one whole leg over visibility 0.5) is now kept
+  down to 0.7 (`?crouchaspect`, `1.5` is the old gate). Reload the page on both phones.
 - Range when crouched. `phone.html` ranges from eye-to-ankle height over 0.90 of the standing
-  height. Crouched, that height is about 0.48 (full squat) to 0.68 (one knee down) of standing,
-  so the range reads 1.3 to 1.9 times too far. With R2's own error on top it lands past the
+  height. Crouched, that height is 0.85 (legs starting to fold) to 0.48 (full squat) of standing,
+  so the range reads 1.2 to 1.9 times too far. With R2's own error on top it lands past the
   two-phone fix's limit (2x), and the person split in two: SEEN on R1's bearing plus an x-ray
-  copy far along R2's ray (to the right of the person from R1 at Morrissette). `hud_fusion` now
-  checks each contact's own landmarks: both legs folded (the CROUCH rule above) and an
-  eye-to-ankle range means the range is taken with the crouch height (x0.64, 0.58 over 0.90).
-  A contact ranged from the torso (no eyes or ankles in view) is left as sent. Log, at most every
-  5 s per phone: `NODE R1 crouch range R1-p3: eye-to-ankle range 4.12 m taken as crouched, 2.65 m
-  (x0.64; ...; N so far)`. `FUSION_ARGS=--no-crouch-range` is the old behaviour. Host replay
-  (`test_handoff`, crouch scene, 2.5 s crouched): before, a second track 67 of 82 ticks, an x-ray
-  copy drawn 74 of 82 frames, 2.6 m from the person and 1.3 m to their right; after, one track, 0
-  x-ray frames, CROUCH every tick, at most 0.20 m off.
+  copy far along R2's ray (to the right of the person from R1 at Morrissette). `hud_fusion`
+  checks each contact's own landmarks as it arrives (no votes, no delay): both legs folded (the
+  CROUCH rule above) and an eye-to-ankle range means the range is scaled by the height the phone
+  measured over the standing height, and the standing height is read off the person's own body
+  in the same picture (thigh or shin over 0.25, torso over 0.30, shoulder line over 0.24, the
+  longest wins). So the factor follows the crouch down and up (x0.85 to x0.47) instead of one
+  fixed x0.64 step. A contact ranged from the torso (no eyes or ankles in view) is left as sent.
+  Log, at most every 5 s per phone: `NODE R1 crouch range R1-p3: eye-to-ankle range 4.12 m taken
+  as crouched, 2.65 m (x0.64; ...; N so far)`. `FUSION_ARGS=--no-crouch-range` turns it off.
+- One person, one mark. If the two phones' fixes still disagree (a range the correction did not
+  catch: ankles hidden so the phone ranged from the box, the way down), the HUD's duplicate check
+  no longer needs R2's track to sit near the seen person: R2's ray through its track only has to
+  cross R1's line to the seen person at a point where both ranges read 0.8 to 2.2 times the
+  distance and one of them within 1.3 (`WV_DUP_*`, off with `--handoff off`). Not when R2 also
+  sees the seen person, not for a track two phones fixed, not across a wall.
+- SEEN box when crouched. The cyan box is R1's own detection box. In a frame R1 missed the person
+  (still drawn as seen for 0.4 s) the HUD used to fall back to a projected standing-person box,
+  0.5 m wide and floor to 1.75 m: tall and narrow on someone crouched. It now keeps R1's last
+  box for up to 0.5 s, and a seen person labelled CROUCH with no box from R1 gets the projected
+  box at the same width and 0.6 of the height.
 - Limits: 2D only. Someone lying along the camera's line of sight (head toward the phone) looks
   short and upright and may read STAND or UNKNOWN.
 
