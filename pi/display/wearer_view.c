@@ -1461,7 +1461,16 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 memset(&r->pfx, 0, sizeof r->pfx);
                 r->fade_a = 1.0f - it->fade;
                 draw_set_dash_phase(old.direct ? 0.0f : anim_person_march());
-                p_marks(r, &old, k, ob);
+                const wv_colour_slot *gs = it->slot >= 0 && r->view ? &r->view->colours[it->slot] : NULL;
+                if (!old.direct && gs && gs->ghost_valid) { /* the ghost as it was, not this frame's pts */
+                    seeker_track gk = *k;
+                    gk.has_pts = gs->ghost_has_pts;
+                    gk.posture = gs->ghost_posture;
+                    memcpy(gk.pts, gs->ghost_pts, sizeof gk.pts);
+                    p_marks(r, &old, &gk, ob);
+                } else {
+                    p_marks(r, &old, k, ob);
+                }
                 r->fx = nfx;
                 r->pfx = npfx;
                 r->fade_a = it->fade;
@@ -1469,6 +1478,13 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
             }
             draw_set_dash_phase(r->pfx.march);
             p_marks(r, it, k, box[i]);
+            if (!it->direct && it->slot >= 0 && r->view) {
+                wv_colour_slot *gs = &r->view->colours[it->slot];
+                gs->ghost_valid = 1;
+                gs->ghost_has_pts = k->has_pts;
+                gs->ghost_posture = k->posture;
+                memcpy(gs->ghost_pts, k->pts, sizeof gs->ghost_pts);
+            }
             r->fade_a = 1.0f;
             draw_set_dash_phase(0);
             memset(&r->fx, 0, sizeof r->fx);

@@ -96,6 +96,9 @@ typedef struct {
     int64_t direct_ms, xfade_ms; /* last frame the wearer's phone saw them; start of the crossfade */
     int plate_valid;  /* plan theme, animations on: where this person's plate was drawn, so a plate */
     float plate_x, plate_y; /* that has to move (layout changed) glides there instead of jumping */
+    int ghost_valid;  /* plan theme: the x-ray ghost last drawn, so the one fading out in a */
+    int ghost_has_pts, ghost_posture; /* crossfade to seen keeps its shape (by then the track's */
+    float ghost_pts[SEEKER_N_JOINTS][3]; /* pts are the wearer phone's own view of the person) */
 } wv_colour_slot;
 
 /* Handoff between x-ray and seen (wv_config.handoff). The wearer's phone misses a person now and
