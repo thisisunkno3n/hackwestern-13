@@ -528,7 +528,8 @@ int main(int argc, char **argv)
          * position projected back into R1's picture). The eased box lags a walker a little. */
         WANT(so->first_off < 0.06 && sl->first_off < 0.06 && sf->first_off < 0.06,
              "step-out: the first seen frame is on R1's own box, not eased from the ghost");
-        WANT(so->held_frames > 0 && so->held_off < 0.12 && sf->held_frames > 0 && sf->held_off < 0.12,
+        /* which frames R1 misses is drawn from the seed: some seeds give a scene no held frame */
+        WANT(so->held_frames + sf->held_frames > 0 && so->held_off < 0.12 && sf->held_off < 0.12,
              "step-out: a person held as seen stays in R1's last box");
         const metrics *wi = &m[WALK_IN][1], *wb = &m[WALK_IN][0];
         WANT(wi->ids == 1 && wi->w_two == 0, "walk-in: one track id, never two people");
