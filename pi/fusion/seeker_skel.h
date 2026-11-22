@@ -44,7 +44,14 @@ typedef struct {
     float dx[SEEKER_N_JOINTS], dy[SEEKER_N_JOINTS]; /* filtered speed, units per second */
     float vis[SEEKER_N_JOINTS];
     int64_t joint_ms[SEEKER_N_JOINTS]; /* last message the joint was visible in (0: never) */
+    float pend_x[SEEKER_N_JOINTS], pend_y[SEEKER_N_JOINTS]; /* SEEKER_SKEL_CONFIRM: a jump waiting */
+    int64_t pend_ms[SEEKER_N_JOINTS];                       /* for a second message (0: none) */
 } seeker_skel;
+
+/* seeker_skel_step smooth flag: a joint that jumps past SEEKER_SKEL_SNAP stays where it was until
+ * a second message puts it within SEEKER_SKEL_SNAP / 2 of the first (then restarts there), so one
+ * wild frame of the pose model is never drawn (fusion's occlusion guard). */
+#define SEEKER_SKEL_CONFIRM 2
 
 /* Contact landmarks to person-local joints (x, y person-height units, visibility 0..1). w, h:
  * the phone's frame in px; hfov_deg its horizontal FOV; range_m its distance to the person (the
@@ -58,7 +65,7 @@ int seeker_skel_local(const seeker_contact *c, int w, int h, float hfov_deg, flo
  * receive time of its newest message; raw: that message's person-local skeleton, or NULL when it
  * had none for this person. Only a new seq updates the filters; ticks in between repeat the last
  * output. smooth 0 passes joints through unfiltered (hud_fusion --no-skel-smooth), holds and
- * visibility rules still apply. Writes the skeleton to send into out (visibility 0: do not draw
+ * visibility rules still apply; 1 filters, | SEEKER_SKEL_CONFIRM also confirms jumps. Writes the skeleton to send into out (visibility 0: do not draw
  * that joint) and returns 1, or 0 when there is none to send. */
 int seeker_skel_step(seeker_skel *s, const char *node, long seq, int64_t rx_ms,
                      const float (*raw)[3], int smooth, float out[SEEKER_N_JOINTS][3]);

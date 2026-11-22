@@ -83,3 +83,5 @@ $CC $FLAGS "-DSEEKER_SOURCE_DIR=\"$(pwd)\"" -o "$OUT/sim_smooth" tests/sim_smoot
   display/hud_render.c $VIDEO $COMMON $LIBS
 $CC $FLAGS "-DSEEKER_SOURCE_DIR=\"$(pwd)\"" -o "$OUT/test_handoff" tests/test_handoff.c $FUSION \
   display/projection.c display/wearer_view.c $DRAW $VIDEO $COMMON $LIBS
+$CC $FLAGS "-DSEEKER_SOURCE_DIR=\"$(pwd)\"" -o "$OUT/test_occlusion" tests/test_occlusion.c $FUSION \
+  display/projection.c display/wearer_view.c $DRAW $VIDEO $COMMON $LIBS

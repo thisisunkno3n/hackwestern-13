@@ -104,6 +104,13 @@ typedef struct {
     int warned_tag;        /* unknown tag id last logged, -1 none */
     int64_t crouch_log_ms; /* last "crouch range" log line */
     long crouch_ranges;    /* contacts ranged with the crouch height (logs, tests) */
+    /* Occlusion guard (SEEKER_OCCL_*): */
+    unsigned char part[SEEKER_MAX_CONTACTS]; /* last message's contacts: 1 shows part of a body,
+                                              * 2 whole but held partial, 4 near frag_bearing */
+    int64_t frag_ms;       /* when this node last saw part of someone, at frag_bearing */
+    float frag_bearing;
+    int frag_whole;        /* whole sightings near frag_bearing since then */
+    long frag_held;        /* whole sightings taken as partial (logs, tests) */
 } seeker_fusion_node;
 
 /* Crouch height model. phone.html ranges from the eye (or nose) to mid-ankle height over
@@ -223,6 +230,28 @@ typedef struct {
 #define SEEKER_HANDOFF_FRESH_MS 200   /* ratios are learned only from messages this new */
 #define SEEKER_HANDOFF_BEARING_DEG 20.0f /* bearing-only continuation: at most this far off */
 
+/* Occlusion guard (fusion.occl_guard, on with the handoff; hud_fusion --no-occl-guard). A phone
+ * that sees someone cut by a wall's edge still gets every joint from the pose model: the hidden
+ * ones guessed, pushed on into the wall and fanned out, at visibility 0.3 to 0.8, and now and then
+ * a confident guess of the whole body (head and ankles over 0.5) that reads as a whole person.
+ *   - A whole contact within SEEKER_OCCL_BEARING_DEG of where its node saw part of someone in the
+ *     last SEEKER_OCCL_HOLD_MS is held partial until SEEKER_OCCL_WHOLE_N whole messages in a row:
+ *     one guessed frame does not make the wearer the primary (no SEEN flash, no crossfade, no
+ *     skeleton from that view). Triangulation still takes it as whole (its range with its
+ *     bearing), as before: by bearing alone its guessed hip would slide the fix along the other
+ *     phone's ray.
+ *   - With every view of the person partial, the skeleton comes from the one with the most joints
+ *     at SEEKER_OCCL_FRAG_VIS inside its frame (not the wearer's just because it is the wearer's).
+ *   - From a partial view, or one near where its node saw a part in the last SEEKER_OCCL_HOLD_MS,
+ *     joints under SEEKER_OCCL_FRAG_VIS are not taken, nor are joints placed on or past the
+ *     frame's edge from any view: they are held, then hidden (seeker_skel.h).
+ *   - The wearer's lone partial sighting continues a track on its bearing at the distance of the
+ *     track's last fix, not one moved on by its velocity: no walking on into the wall. */
+#define SEEKER_OCCL_HOLD_MS 1000
+#define SEEKER_OCCL_BEARING_DEG 8.0f
+#define SEEKER_OCCL_WHOLE_N 3
+#define SEEKER_OCCL_FRAG_VIS 0.5f
+
 #define SEEKER_FUSION_MEM 32
 
 typedef struct {
@@ -246,6 +275,8 @@ typedef struct {
     int crouch_range; /* 1 (init default): eye-to-ankle ranges of a crouched contact use the
                        * crouch height (SEEKER_CROUCH_*); 0: as the phone sent them
                        * (hud_fusion --no-crouch-range) */
+    int occl_guard;  /* 1 (init default), with handoff: a person cut by a wall or the frame edge
+                      * (SEEKER_OCCL_*); 0 is the old code (hud_fusion --no-occl-guard) */
     int n_tags;    /* room poses of tags other than 0 (hud_fusion --tag-pose) */
     seeker_fusion_tag tags[SEEKER_MAX_TAGS];
     seeker_tri_opts tri; /* triangulation tuning; init copies assoc_m and the fusion.tri_* keys */

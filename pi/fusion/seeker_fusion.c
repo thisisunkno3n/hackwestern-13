@@ -44,6 +44,7 @@ void seeker_fusion_init(seeker_fusion *f, const seeker_config *cfg)
     f->range_hfov = 1;
     f->handoff = 1;
     f->crouch_range = 1;
+    f->occl_guard = 1;
     seeker_tri_defaults(&f->tri);
     f->tri.assoc_m = cfg->assoc_m;
     f->tri.bearing_sigma_deg = cfg->tri_bearing_sigma_deg;
@@ -179,6 +180,7 @@ int seeker_fusion_set_hfov(seeker_fusion *f, const char *id, const char *spec)
 
 /* --hfov: rescale the bearings the phone computed with its own FOV to the real one. */
 static float contact_ground_range(const seeker_fusion_node *n, const seeker_contact *c);
+static int contact_partial(const seeker_contact *c, int w, int h);
 
 /* The phone's bearings and box-height ranges with its real FOV (--hfov), the real people's
  * height (--person-h, phone.html assumes SEEKER_SKEL_PERSON_M) and a per-phone factor
@@ -641,6 +643,34 @@ static void apply_crouch_range(seeker_fusion_node *n, int64_t now_ms)
     }
 }
 
+/* Which of the node's new contacts show only part of a body (SEEKER_HANDOFF_*), with the
+ * occlusion guard's hold on a whole sighting where the node just saw a part (SEEKER_OCCL_*). */
+static void mark_partial(seeker_fusion *f, seeker_fusion_node *n, int64_t now_ms)
+{
+    for (int i = 0; i < n->last.n; i++) {
+        const seeker_contact *c = &n->last.c[i];
+        int part = f->handoff && contact_partial(c, n->image_w, n->image_h);
+        if (f->handoff && f->occl_guard) {
+            int near = n->frag_ms && now_ms - n->frag_ms <= SEEKER_OCCL_HOLD_MS &&
+                       fabsf(seeker_wrap180(c->bearing_deg - n->frag_bearing)) <= SEEKER_OCCL_BEARING_DEG;
+            if (part) {
+                n->frag_ms = now_ms;
+                n->frag_bearing = c->bearing_deg;
+                n->frag_whole = 0;
+            } else if (near && ++n->frag_whole < SEEKER_OCCL_WHOLE_N) {
+                part = 2;
+                if (n->frag_whole == 1)
+                    seeker_log("NODE %s occl: whole sighting %s at %.1f deg held partial, part of someone "
+                               "seen there %lld ms ago (%ld held)",
+                               n->id, c->id, c->bearing_deg, (long long)(now_ms - n->frag_ms), n->frag_held + 1);
+                n->frag_held++;
+            }
+            part |= near || part ? 4 : 0;
+        }
+        n->part[i] = (unsigned char)part;
+    }
+}
+
 int seeker_fusion_ingest(seeker_fusion *f, const seeker_remote_contacts *m, int64_t now_ms)
 {
     seeker_fusion_node *n = find_node(f, m->node_id, 1);
@@ -678,6 +708,7 @@ int seeker_fusion_ingest(seeker_fusion *f, const seeker_remote_contacts *m, int6
     if (f->crouch_range)
         apply_crouch_range(n, now_ms);
     apply_hfov(f, n, m);
+    mark_partial(f, n, now_ms);
     return (int)(n - f->nodes);
 }
 
@@ -1160,6 +1191,13 @@ static int handoff_start(const seeker_fusion *f, seeker_fusion_mem *mm, unsigned
         now_ms - mm->seen_ms > f->cfg->smooth_reset_ms)
         return 0;
     predict(f, mm, now_ms, hx, hy);
+    if (f->occl_guard && f->cfg->smooth && mm->ab.valid) {
+        /* Where it was drawn (moved on at most predict_ms): a person unseen behind a wall has not
+         * walked on at the old speed into it. */
+        float h = clampf((float)(now_ms - mm->ab_rx_ms) / 1000.0f, 0, (float)f->cfg->predict_ms / 1000.0f);
+        *hx = mm->ab.x + mm->ab.vx * h;
+        *hy = mm->ab.y + mm->ab.vy * h;
+    }
     if (mm->ho_ms && now_ms - mm->ho_ms < SEEKER_HANDOFF_MS) {
         float e = expf(-(float)(now_ms - mm->ho_ms) / SEEKER_HANDOFF_TAU_MS);
         *hx += mm->ho_x * e;
@@ -1174,6 +1212,48 @@ static int handoff_start(const seeker_fusion *f, seeker_fusion_mem *mm, unsigned
     mm->pv_x = mm->ab.x;
     mm->pv_y = mm->ab.y;
     return 1;
+}
+
+/* ---- occlusion guard (SEEKER_OCCL_*) ---- */
+
+/* Joints a contact shows at SEEKER_OCCL_FRAG_VIS inside its frame. */
+static int skel_joints(const seeker_contact *c)
+{
+    int n = 0;
+    for (int j = 0; c->has_pts && j < SEEKER_N_JOINTS; j++)
+        n += c->pts[j][2] >= SEEKER_OCCL_FRAG_VIS && c->pts[j][0] > 0.005f && c->pts[j][0] < 0.995f &&
+             c->pts[j][1] > 0.005f && c->pts[j][1] < 0.995f;
+    return n;
+}
+
+/* The ray of cluster cl whose view the track's skeleton comes from: the primary's (prim), or with
+ * every view partial the most complete one (a tie stays with the view the skeleton is in). */
+static int skel_ray(const seeker_fusion *f, const seeker_fusion_mem *mm, const seeker_tri_cluster *cl,
+                    const seeker_ray *rays, const int *ray_node, const int *ray_idx, int prim)
+{
+    int best = prim, best_n = -1;
+    for (int m = 0; m < cl->n; m++) {
+        int r = cl->member[m];
+        if (!rays[r].partial)
+            return prim;
+        const seeker_fusion_node *n = &f->nodes[ray_node[r]];
+        const seeker_contact *c = &n->last.c[ray_idx[r]];
+        int nj = skel_joints(c) * 2 + (mm->skel.valid && !strncmp(n->id, mm->skel.node, sizeof mm->skel.node));
+        if (c->has_pts && nj > best_n)
+            best_n = nj, best = r;
+    }
+    return best;
+}
+
+/* Joints not to take from contact c (its person-local skeleton raw): placed on or past the frame's
+ * edge, and, from a partial view or one near where its node saw a part in the last
+ * SEEKER_OCCL_HOLD_MS, under SEEKER_OCCL_FRAG_VIS (the pose model's guesses). */
+static void occl_mask(float (*raw)[3], const seeker_contact *c, int partial)
+{
+    seeker_posture_mask_offframe(raw, (const float (*)[3])c->pts);
+    for (int j = 0; partial && j < SEEKER_N_JOINTS; j++)
+        if (raw[j][2] < SEEKER_OCCL_FRAG_VIS)
+            raw[j][2] = 0;
 }
 
 void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
@@ -1240,7 +1320,7 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
             r->range_m = c->range_m;
             r->conf = c->conf;
             r->node = i;
-            r->partial = f->handoff && contact_partial(c, n->image_w, n->image_h);
+            r->partial = f->handoff && (n->part[k] & 1);
             ray_node[nr] = i;
             ray_idx[nr++] = k;
         }
@@ -1261,6 +1341,8 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
     /* Cross-node triangulation: the same person seen by R1 and R2 becomes one cluster. */
     static seeker_tri_cluster cls[MAX_RAYS];
     int ncl = seeker_tri_group_prior(rays, nr, &f->tri, pri, nlive, cls, MAX_RAYS);
+    for (int i = 0; i < nr; i++) /* a held whole sighting: part of a body from here on */
+        rays[i].partial |= (f->nodes[ray_node[i]].part[ray_idx[i]] & 2) != 0;
     int nout = ncl < SEEKER_MAX_TRACKS ? ncl : SEEKER_MAX_TRACKS;
     const seeker_fusion_node *mnodes[SEEKER_MAX_TRACKS][SEEKER_TRI_MAX_MEMBERS];
     int nms[SEEKER_MAX_TRACKS], wpart[SEEKER_MAX_TRACKS];
@@ -1304,8 +1386,13 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
             if (row_col[r] >= 0) {
                 cl_mem[row_col[r]] = live[r];
                 f->mem[live[r]].matched = 1;
-                if (wpart[row_col[r]]) /* on the wearer's bearing, at the track's distance */
-                    bearing_fix(f, &pri[r], &rays[cls[row_col[r]].member[0]], &cls[row_col[r]].fix);
+                if (wpart[row_col[r]]) { /* on the wearer's bearing, at the track's distance */
+                    seeker_tri_prior at = pri[r];
+                    const seeker_fusion_mem *lm = &f->mem[live[r]];
+                    if (f->occl_guard && lm->ab.valid)
+                        at.x_m = lm->ab.x, at.y_m = lm->ab.y;
+                    bearing_fix(f, &at, &rays[cls[row_col[r]].member[0]], &cls[row_col[r]].fix);
+                }
             }
     for (int a = 0; a < nout; a++)
         if (cl_mem[a] >= 0)
@@ -1398,19 +1485,33 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
         }
         {
             const seeker_fusion_node *pn = mnodes[a][0];
+            const seeker_contact *sc = pcon[a];
+            int sr = -1, guard = f->handoff && f->occl_guard;
+            for (int m = 0; guard && m < cls[a].n && sr < 0; m++) {
+                int r = cls[a].member[m];
+                if (&f->nodes[ray_node[r]].last.c[ray_idx[r]] == pcon[a])
+                    sr = skel_ray(f, mm, &cls[a], rays, ray_node, ray_idx, r);
+            }
+            if (sr >= 0) {
+                pn = &f->nodes[ray_node[sr]];
+                sc = &pn->last.c[ray_idx[sr]];
+            }
             float raw[SEEKER_N_JOINTS][3];
             int have = has_room &&
-                       seeker_skel_local(pcon[a], pn->image_w, pn->image_h, pn->hfov_deg,
+                       seeker_skel_local(sc, pn->image_w, pn->image_h, pn->hfov_deg,
                                          hypotf(x - pn->x_m, y - pn->y_m), raw);
+            if (have && sr >= 0)
+                occl_mask(raw, sc, pn->part[ray_idx[sr]] != 0);
             k->has_pts = seeker_skel_step(&mm->skel, pn->id, pn->msgs, pn->last_rx_ms,
-                                          have ? (const float (*)[3])raw : NULL, f->skel_smooth,
+                                          have ? (const float (*)[3])raw : NULL,
+                                          f->skel_smooth ? 1 | (guard ? SEEKER_SKEL_CONFIRM : 0) : 0,
                                           k->pts);
             int was = mm->posture.label;
             float pp[SEEKER_N_JOINTS][3];
             if (k->has_pts) {
                 memcpy(pp, k->pts, sizeof pp);
                 if (have)
-                    seeker_posture_mask_offframe(pp, (const float (*)[3])pcon[a]->pts);
+                    seeker_posture_mask_offframe(pp, (const float (*)[3])sc->pts);
             }
             k->posture = seeker_posture_update(
                 &mm->posture, k->has_pts ? (const float (*)[3])pp : NULL, now_ms);

@@ -62,6 +62,19 @@ static void restart_joint(seeker_skel *s, int j, const float *z, int64_t rx_ms)
     s->dx[j] = s->dy[j] = 0;
     s->vis[j] = z[2];
     s->joint_ms[j] = rx_ms;
+    s->pend_ms[j] = 0;
+}
+
+/* SEEKER_SKEL_CONFIRM: 1 when a jump of joint j to z agrees with the one waiting, else it waits. */
+static int jump_confirmed(seeker_skel *s, int j, const float *z, int64_t rx_ms)
+{
+    if (s->pend_ms[j] && rx_ms - s->pend_ms[j] <= SEEKER_SKEL_JOINT_HOLD_MS &&
+        fabsf(z[0] - s->pend_x[j]) <= 0.5f * SEEKER_SKEL_SNAP && fabsf(z[1] - s->pend_y[j]) <= 0.5f * SEEKER_SKEL_SNAP)
+        return 1;
+    s->pend_x[j] = z[0];
+    s->pend_y[j] = z[1];
+    s->pend_ms[j] = rx_ms;
+    return 0;
 }
 
 static void update(seeker_skel *s, const float (*raw)[3], int64_t rx_ms, int smooth)
@@ -71,11 +84,14 @@ static void update(seeker_skel *s, const float (*raw)[3], int64_t rx_ms, int smo
         if (z[2] < SEEKER_SKEL_VIS_MIN)
             continue; /* held (or hidden once the hold runs out) */
         int fresh = s->joint_ms[j] > 0 && rx_ms - s->joint_ms[j] <= SEEKER_SKEL_JOINT_HOLD_MS;
-        if (!smooth || !fresh || fabsf(z[0] - s->x[j]) > SEEKER_SKEL_SNAP ||
-            fabsf(z[1] - s->y[j]) > SEEKER_SKEL_SNAP) {
+        int jump = fabsf(z[0] - s->x[j]) > SEEKER_SKEL_SNAP || fabsf(z[1] - s->y[j]) > SEEKER_SKEL_SNAP;
+        if (smooth && fresh && jump && (smooth & SEEKER_SKEL_CONFIRM) && !jump_confirmed(s, j, z, rx_ms))
+            continue; /* held where it was */
+        if (!smooth || !fresh || jump) {
             restart_joint(s, j, z, rx_ms);
             continue;
         }
+        s->pend_ms[j] = 0;
         float dt = (float)(rx_ms - s->joint_ms[j]) / 1000.0f;
         if (dt < 0.01f)
             dt = 0.01f;
