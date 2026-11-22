@@ -5317,6 +5317,86 @@ static void test_posture(void)
     free(c.px);
 }
 
+/* One R1 message (640 x 480, hfov 66) of body tmpl range_m away, feet on image row 450, ranged as
+ * phone.html does (eye midpoint to ankle midpoint / 0.90, else the torso / 0.30); joints in
+ * hide[] get visibility 0.1. Returns the range fusion keeps for it; sent gets the phone's. */
+static float crouch_range_once(seeker_fusion *f, const float (*tmpl)[2], float range_m,
+                               const int *hide, int nhide, int64_t t_ms, float *sent)
+{
+    seeker_remote_contacts m;
+    memset(&m, 0, sizeof m);
+    snprintf(m.node_id, sizeof m.node_id, "R1");
+    m.v = 2;
+    m.t_mono_ms = t_ms;
+    m.width = 640;
+    m.height = 480;
+    m.hfov_deg = 66;
+    m.n = 1;
+    seeker_contact *c = &m.c[0];
+    snprintf(c->id, sizeof c->id, "R1-p1");
+    snprintf(c->cls, sizeof c->cls, "person");
+    float fpx = 320.0f / tanf(33.0f * 0.017453293f), hpx = fpx * 1.7f / range_m;
+    float hip_v = 450.0f - 0.5f * (tmpl[15][1] + tmpl[16][1]) * hpx;
+    for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+        c->pts[j][0] = (320.0f + tmpl[j][0] * hpx) / 640.0f;
+        c->pts[j][1] = (hip_v + tmpl[j][1] * hpx) / 480.0f;
+        c->pts[j][2] = 0.9f;
+    }
+    for (int i = 0; i < nhide; i++)
+        c->pts[hide[i]][2] = 0.1f;
+    c->has_pts = 1;
+    c->conf = 0.9f;
+    const float(*p)[3] = c->pts;
+    float len;
+    if (p[1][2] > 0.5f && p[15][2] > 0.5f)
+        len = hypotf(0.5f * (p[1][0] + p[2][0] - p[15][0] - p[16][0]) * 640.0f,
+                     0.5f * (p[1][1] + p[2][1] - p[15][1] - p[16][1]) * 480.0f) / 0.90f;
+    else
+        len = hypotf(0.5f * (p[5][0] + p[6][0] - p[11][0] - p[12][0]) * 640.0f,
+                     0.5f * (p[5][1] + p[6][1] - p[11][1] - p[12][1]) * 480.0f) / 0.30f;
+    c->has_range = 1;
+    c->range_m = fpx * 1.7f / len;
+    *sent = c->range_m;
+    int n = seeker_fusion_ingest(f, &m, t_ms);
+    return n >= 0 ? f->nodes[n].last.c[0].range_m : 0;
+}
+
+/* A crouched person's eye-to-ankle range reads long (SEEKER_CROUCH_EYE_ANKLE_FRAC); fusion takes
+ * it back to about the truth, and leaves standing, stair, bent-over and torso-ranged bodies. */
+static void test_crouch_range(void)
+{
+    static seeker_config cfg;
+    static seeker_fusion f;
+    seeker_config_defaults(&cfg);
+    seeker_fusion_init(&f, &cfg);
+    CHECK(f.crouch_range == 1);
+    const int head[] = { 0, 1, 2, 3, 4 };
+    static const struct {
+        const char *name;
+        const float (*tmpl)[2];
+        int hide;
+    } cases[] = { { "standing", SKEL_T, 0 },     { "crouched", SKEL_CROUCH, 0 },
+                  { "crouched, no head (torso range)", SKEL_CROUCH, 5 },
+                  { "bent over", SKEL_BEND, 0 }, { "stairs", SKEL_STAIRS, 0 } };
+    float kept[5], sent[5];
+    for (int i = 0; i < 5; i++) {
+        kept[i] = crouch_range_once(&f, cases[i].tmpl, 2.5f, cases[i].hide ? head : NULL,
+                                    cases[i].hide, 1000 + 66 * i, &sent[i]);
+        printf("crouch range, %s at 2.5 m: phone %.2f m, fusion %.2f m\n", cases[i].name, sent[i],
+               kept[i]);
+        if (i != 1)
+            CHECK(kept[i] == sent[i]);
+    }
+    CHECK(sent[1] > 3.4f);                                /* the bug: about 1.5x long */
+    CHECK(fabsf(kept[1] - 2.5f) < 0.3f && NEAR(kept[1], sent[1] * 0.58f / 0.90f, 1e-3));
+    CHECK(f.nodes[0].crouch_ranges == 1);
+    /* --no-crouch-range: as the phone sent it */
+    seeker_fusion_init(&f, &cfg);
+    f.crouch_range = 0;
+    float s, k = crouch_range_once(&f, SKEL_CROUCH, 2.5f, NULL, 0, 1000, &s);
+    CHECK(k == s && f.nodes[0].crouch_ranges == 0);
+}
+
 /* Calibration: Pi-side FOV (hud_fusion --hfov), wearer-relative ranges (fusion.wearer_node),
  * and the wearer view keeping a frozen picture through a short VIDEO LOST. */
 static void test_calibration_and_freeze(void)
@@ -5797,6 +5877,7 @@ int main(void)
     test_anim_handoff();
     test_colour_hysteresis();
     test_posture();
+    test_crouch_range();
     test_calibration_and_freeze();
     test_moving_wearer_hold();
     test_r2_pinned_left();
