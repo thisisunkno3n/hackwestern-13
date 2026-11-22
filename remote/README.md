@@ -16,7 +16,26 @@ phone.html (getUserMedia -> MediaPipe pose)  --WS/WSS-->  ws_ingest.py  --UDP re
   (node, link, fps, bearing, conf, range, pose or tag state, video). A magenta banner appears when
   the Pi link has been down for 2.5 s; camera or permission problems show in plain words on the
   start screen. Fonts (Atkinson Hyperlegible Next and Mono) load from Google Fonts without blocking,
-  with system fallbacks. Single file: copy it as is to the Pi (`~/seeker/remote/phone.html`).
+  with system fallbacks. Single file: copy it as is to the Pi (`~/seeker/remote/phone.html`):
+  `scp remote/phone.html qnxuser@qnxpi-felix.local:~/seeker/remote/phone.html`, then reload the phones.
+
+  Staying up unattended (the wall phone, R2):
+  - The link reconnects by itself (0.5, 1, 2, 4, then every 5 s), gives up on a handshake that
+    hangs for 6 s, and drops a socket whose send buffer stops draining for 5 s. Every new socket
+    sends the role message first, with the last known pose if the live one is missing.
+  - Screen Wake Lock (Safari 16.4+) keeps the screen on, and is taken again after the page comes
+    back, on any touch, and every second. Back from a screen lock of 3 s or more, the page opens a
+    fresh socket and restarts the camera if iOS stopped it. A magenta chip at the top says
+    `Screen may sleep`, `Camera restarting` or `Detector restarting` when one of those is wrong.
+    Still set Auto-Lock to Never on the wall phone as a backup.
+  - A reload in the same tab starts the camera again without a tap, and a link re-opened as just
+    `?node=R2` gets its missing keys (`&pose=` and the rest) back from that tab's last load of the
+    same node. `?fresh=1` skips the restore, `?autostart=0` keeps the start screen.
+  - Video goes out only while less than 64 KB is still unsent (frames are dropped, never queued; the
+    Video cell reads `Busy`), and detections are skipped only past 256 KB.
+  - R2 does not stream video even with `&video=1`, since it is not the view node and the bridge drops
+    its frames. It streams when the relay sends `video_ctrl` with `stream_video: true`, or with
+    `?video=always` (plain `ws_ingest.py --view-node R2` sends no `video_ctrl`).
 - `ws_ingest.py` -- WS/WSS→UDP bridge; also serves `phone.html`. `--fusion <pi> --fusion-port 47103`.
 - `hud_remote.py` -- *alternative* Mac-relay path (OpenCV on a phone IP-cam). Kept for the Cubie
   fallback / non-browser phones; the in-browser path above is primary post-pivot.
