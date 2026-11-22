@@ -274,6 +274,29 @@ const vis = p => (p && p.visibility) || 0;
 const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 const pxDist = (a, b, W, H) => Math.hypot((a.x - b.x) * W, (a.y - b.y) * H);
 
+// ---- compact skeleton landmarks (the "wallhack"): ADDITIVE to remote_contacts ----------------
+// So a person only R2 sees can be redrawn on R1's HUD as a ghosted skeleton, not just a marker,
+// we attach the pose landmarks we already computed to each contact as `pts`. MediaPipe's 33
+// landmarks are downsampled to a COCO-17 body skeleton and FLAT-packed as integers
+//   [x0,y0,v0, x1,y1,v1, ...]  (17 joints -> 51 ints)
+// x,y are the image-normalized landmark (0..1) * 1000 (MediaPipe may emit <0 or >1000 for
+// off-frame joints; left as-is), visibility is 0..100. Flat ints keep the datagram well under
+// SEEKER_MAX_DATAGRAM (8192 B) and the C decoder's JSON token budget (MAX_TOKS 2048) even at the
+// 16-contact cap, and the C fusion ignores the unknown `pts` key until Felix parses it (IF-5).
+// ?skel=0 turns it off (pure {bearing,range,box} wire, for bandwidth tests).
+const SKEL = qs.get("skel") !== "0";
+const PTS_IDX = [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
+//              nose Le  Re  Lear Rear Lsh Rsh Lel Rel Lwr Rwr Lhp Rhp Lkn Rkn Lank Rank
+function packPts(lms) {
+  const out = [];
+  for (const i of PTS_IDX) {
+    const p = (lms && lms[i]) || {};
+    out.push(Math.round((p.x || 0) * 1000), Math.round((p.y || 0) * 1000),
+             Math.round((p.visibility || 0) * 100));
+  }
+  return out;
+}
+
 // Pixel height of the whole person, and how it was measured: { hpx, src } or null.
 // Does this pose look like an upright human? Rejects squat clutter and scrambled skeletons.
 function isUpright(lms, box) {
@@ -430,7 +453,7 @@ function loop() {
                         Math.round((x1-x0)*W), Math.round((y1-y0)*H)] : null;
     if (UPRIGHT_ON && !isUpright(lms, box)) continue;       // reject clutter / non-upright shapes
     const ph = personHeightPx(lms, box, W, H);
-    raw.push({ bearing_deg, conf, box, ph });
+    raw.push({ bearing_deg, conf, box, ph, lms });   // keep lms so the contact can carry a skeleton
     drawPose(lms, cxN);
   }
   // one-euro per tracked person on bearing and pixel height, then range from height
@@ -448,7 +471,9 @@ function loop() {
              conf: Math.round(c.conf * 100) / 100,
              box: c.box,
              range_m: range_m === null ? null : Math.round(range_m * 100) / 100,  // 1 cm, not 10 cm
-             range_src: range_m === null ? null : tr.src };
+             range_src: range_m === null ? null : tr.src,
+             // ADDITIVE skeleton (the wallhack); undefined -> JSON.stringify drops it when ?skel=0
+             pts: SKEL ? packPts(c.lms) : undefined };
   });
   if (calib) {
     if (contacts.length === 1 && match[0].hpx > 0) { calib.samples.push(match[0].hpx); calib.src = match[0].src; }

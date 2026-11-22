@@ -18,6 +18,7 @@ Bridge -> hud_fusion (UDP :47103): IF-5.4 remote_contacts, t_mono_ms stamped on 
 import socket, threading, json, hashlib, base64, struct, os, time, argparse, sys, ssl
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+SEEKER_MAX_DATAGRAM = 8192   # IF-5 / common/seeker_msgs.h: max 8 KB per UDP datagram
 CTYPES = {".html": "text/html", ".js": "application/javascript", ".css": "text/css"}
 LOG = lambda *a: print("[ws_ingest]", *a, file=sys.stderr, flush=True)
 
@@ -175,12 +176,23 @@ class Bridge:
             ct.setdefault("cls", "person")
             ct.setdefault("box", None)
             ct.setdefault("range_m", None)
+            # `pts` (skeleton landmarks, phone.html) rides through verbatim when present; the C
+            # fusion ignores the unknown key until it is parsed (IF-5, additive). Forwarded as-is.
         now_ms = int(time.monotonic() * 1000)   # Pi receive clock (IF-1 clock rule)
         msg = {"type": "remote_contacts", "v": self.wire_v, "src": node_id,
                "t_mono_ms": now_ms, "ts_ms": now_ms, "node_id": node_id,
                "pose": pose, "width": width, "height": height, "hfov_deg": hfov_deg,
                "contacts": contacts}
-        self.udp.sendto(json.dumps(msg).encode(), self.dst)
+        wire = json.dumps(msg).encode()
+        # Backward-compat guard: an oversized datagram is truncated by the C recv buffer
+        # (buf[SEEKER_MAX_DATAGRAM + 1]) and then fails to parse, losing EVERY field including
+        # bearing/range. The skeleton is optional, so if `pts` pushed us over the 8 KB limit,
+        # drop only `pts` and re-encode, keeping the core contacts intact.
+        if len(wire) > SEEKER_MAX_DATAGRAM:
+            for ct in contacts:
+                ct.pop("pts", None)
+            wire = json.dumps(msg).encode()
+        self.udp.sendto(wire, self.dst)
 
     def ws_loop(self, c):
         node_id, pose = None, None           # null until the phone gives a measured pose
@@ -227,7 +239,8 @@ class Bridge:
                 contacts = m["contacts"]
             elif "bearing_deg" in m:
                 contacts = [{"conf": m.get("conf", 0.9), "box": m.get("box"),
-                             "bearing_deg": m["bearing_deg"], "range_m": m.get("range_m")}]
+                             "bearing_deg": m["bearing_deg"], "range_m": m.get("range_m"),
+                             "pts": m.get("pts")}]
             else:
                 LOG("node %s connected pose=%s" % (node_id, pose)); continue
             if node_id:
