@@ -36,25 +36,31 @@ void plan_plate_size(float u, const plan_line *l, int n, int *w, int *h)
 void plan_plate(canvas *c, float u, int x, int y, const plan_line *l, int n, uint32_t edge,
                 int red_hatch)
 {
+    plan_plate_a(c, u, x, y, l, n, edge, red_hatch, 255);
+}
+
+void plan_plate_a(canvas *c, float u, int x, int y, const plan_line *l, int n, uint32_t edge,
+                  int red_hatch, int alpha)
+{
     int w, h;
     plan_plate_size(u, l, n, &w, &h);
     draw_poly_style st = { 0 };
     st.fill = P_PLATE;
-    st.fill_a = P_PLATE_A;
+    st.fill_a = P_PLATE_A * alpha / 255;
     if (red_hatch) {
         st.hatch = P_RED;
-        st.hatch_a = 71; /* 28% */
+        st.hatch_a = 71 * alpha / 255; /* 28% */
         st.hatch_gap = 9 * u;
         st.hatch_w = 2 * u;
     }
     st.edge = edge;
-    st.edge_a = 255;
+    st.edge_a = alpha;
     st.edge_w = 1.5f * u;
     draw_cut_rect(c, (float)x, (float)y, (float)w, (float)h, 10 * u, &st);
     int ty = y + S(u, 9);
     for (int i = 0; i < n; i++) {
         int px = S(u, (float)l[i].size);
-        draw_ui_text_top(c, x + S(u, 12), ty, px, l[i].font, l[i].col, l[i].alpha, l[i].text);
+        draw_ui_text_top(c, x + S(u, 12), ty, px, l[i].font, l[i].col, l[i].alpha * alpha / 255, l[i].text);
         ty += (int)lroundf((float)px * 1.15f) + S(u, 3);
     }
 }

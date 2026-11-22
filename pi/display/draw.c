@@ -212,6 +212,13 @@ int draw_theme_parse(const char *s)
 
 /* ---- alpha blending and anti-aliased lines ---- */
 
+static float g_dash_phase; /* draw_set_dash_phase */
+
+void draw_set_dash_phase(float px)
+{
+    g_dash_phase = px;
+}
+
 uint32_t draw_mix(uint32_t d, uint32_t s, int a)
 {
     if (a <= 0)
@@ -304,7 +311,8 @@ void draw_circle_aa(canvas *c, float cx, float cy, float r, float thick, float d
                 continue;
             if (dash > 0 && period > 0) {
                 float s = (atan2f(ey, ex) + 3.14159265f) * r; /* arc length from the left */
-                if (fmodf(s, period) >= dash)
+                float m = fmodf(s - g_dash_phase, period);
+                if ((m < 0 ? m + period : m) >= dash)
                     continue;
             }
             c->px[j * c->stride + i] = draw_mix(c->px[j * c->stride + i], col, (int)(alpha * cov + 0.5f));
@@ -453,9 +461,12 @@ void draw_dashed_aa(canvas *c, float x0, float y0, float x1, float y1, float wid
     }
     if (gap < 0)
         gap = 0;
-    float ux = dx / len, uy = dy / len;
-    for (float a = 0; a < len && a < 20000.0f; a += dash + gap) {
-        float b = a + dash < len ? a + dash : len;
-        draw_line_aa(c, x0 + ux * a, y0 + uy * a, x0 + ux * b, y0 + uy * b, width, cap, col, alpha);
+    float ux = dx / len, uy = dy / len, a0 = 0;
+    if (g_dash_phase != 0.0f) /* pattern shifted forward along the line (marching dashes) */
+        a0 = fmodf(g_dash_phase, dash + gap) - (dash + gap);
+    for (float a = a0; a < len && a < 20000.0f; a += dash + gap) {
+        float b = a + dash < len ? a + dash : len, s = a > 0 ? a : 0;
+        if (b > s)
+            draw_line_aa(c, x0 + ux * s, y0 + uy * s, x0 + ux * b, y0 + uy * b, width, cap, col, alpha);
     }
 }

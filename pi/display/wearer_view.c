@@ -1,5 +1,6 @@
 #include "wearer_view.h"
 #include "plan.h"
+#include "anim_person.h"
 #include "seeker_json.h"
 #include "seeker_time.h"
 
@@ -418,6 +419,7 @@ typedef struct {
     float u;        /* plan: frame height / 720 */
     float fade_a;   /* plan marks: alpha factor (crossfade) */
     int n_fading;
+    ap_fx fx;       /* plan: the person being drawn's animation (anim_person.h), 0 = none */
 } rc;
 
 static int clampi(int v, int lo, int hi)
@@ -1062,14 +1064,15 @@ static void p_tag(rc *r, int bx, int by, int bw, float lead_dy, float dx, float 
     }
     if (pick >= 2) { /* above: a straight leader up from the box top */
         float lx = (float)clampi(px + pw / 2, bx + P(r, 6), bx + bw - P(r, 6));
-        plan_leader(r->c, r->u, lx, (float)by, lx, (float)(py + ph), col);
+        ap_leader(r->c, r->u, lx, (float)by, lx, (float)(py + ph), col, &r->fx);
     } else {
         int right = pick == 0;
         float lx = (float)(right ? bx + bw : bx);
         float ly = (float)clampi(by + P(r, lead_dy), 0, H - 1);
-        plan_leader(r->c, r->u, lx, ly, (float)(right ? px : px + pw), (float)(py + P(r, 14)), col);
+        ap_leader(r->c, r->u, lx, ly, (float)(right ? px : px + pw), (float)(py + P(r, 14)), col, &r->fx);
     }
-    plan_plate(r->c, r->u, px, py, l, n, col, red_hatch);
+    /* Slides in from the person's side: right plate from the left, left from the right, above from below. */
+    ap_plate(r->c, r->u, px, py, l, n, col, red_hatch, pick == 0 ? -1 : pick == 1 ? 1 : 0, pick >= 2, &r->fx);
 }
 
 /* The box a person is drawn in this frame: item_box, eased like classic (WV_BOX_EASE), and cut
@@ -1133,6 +1136,10 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
     if (it->direct) {
         uint32_t col = p_alarm(r, it, k) ? P_RED : P_INK;
         int a = (int)((st ? 115 : 255) * r->fade_a);
+        if (r->fx.active && (r->fx.echo || r->fx.trace < 1.0f)) { /* corner trace, or an echo */
+            ap_seen_frame(r->c, r->u, x, y, w, h, col, a, &r->fx);
+            return;
+        }
         draw_poly_style fs = { 0 };
         fs.edge = col;
         fs.edge_a = a;
@@ -1143,7 +1150,7 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
         draw_line_aa(r->c, x + w - t8, my, x + w + t8, my, 2 * r->u, DRAW_CAP_BUTT, col, a);
         return;
     }
-    int a = (int)((st ? 120 : 255) * r->fade_a);
+    int a = ap_alpha(&r->fx, (int)((st ? 120 : 255) * r->fade_a));
     if (it->has_ray_span)
         draw_dashed_aa(r->c, (float)to_sx(r, it->ray_u0), (float)to_sy(r, it->ray_v0), (float)to_sx(r, it->ray_u1),
                        (float)to_sy(r, it->ray_v1), 2 * r->u, 10 * r->u, 7 * r->u, DRAW_CAP_BUTT, P_HIDDEN, a * 7 / 10);
@@ -1183,10 +1190,10 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
     }
     draw_poly_style hs = { 0 };
     hs.hatch = P_HIDDEN;
-    hs.hatch_a = (int)(18 * r->fade_a); /* 7% */
+    hs.hatch_a = ap_alpha(&r->fx, (int)(18 * r->fade_a)); /* 7% */
     hs.hatch_gap = 12 * r->u;
     hs.hatch_w = 2 * r->u;
-    draw_cut_rect(r->c, (float)x, (float)y, (float)w, (float)h, 0, &hs);
+    ap_hatch_rect(r->c, (float)x, (float)y, (float)w, (float)h, &hs, &r->fx);
     draw_dashed_rect(r->c, (float)x, (float)y, (float)w, (float)h, 1.5f * r->u, 10 * r->u, 7 * r->u, P_HIDDEN,
                      a * 55 / 100);
     int nb = 0;
@@ -1391,6 +1398,8 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
             r->n_posture[k->posture >= 0 && k->posture <= SEEKER_POSTURE_DOWN ? k->posture : 0]++;
             /* Marks: people behind walls first, then seen people over them. A change of look
              * dissolves: the old look fades out in the same box while the new one fades in. */
+            r->fx = anim_person_track(k->id, it->direct);
+            draw_set_dash_phase(r->fx.march);
             if (it->fade < 1.0f) {
                 wv_item old = *it;
                 old.direct = !it->direct;
@@ -1402,6 +1411,9 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
             }
             p_marks(r, it, k, box[i]);
             r->fade_a = 1.0f;
+            draw_set_dash_phase(0);
+            memset(&r->fx, 0, sizeof r->fx);
+            anim_person_store(k->id, it, k, box[i]);
             /* Labels come after all marks and keep off every figure (plates move up or down). */
             /* A standing ghost's head ring rises above its hull; a lying one's is inside it. */
             int head = it->direct || p_down(k) ? 0 : box[i][3] / 8;
@@ -1413,6 +1425,20 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 L[3] = box[i][3] + 8 + head;
             }
         }
+    /* Echoes of people no longer drawn in view: their last marks, fading, no plate. */
+    anim_person_end();
+    for (int e = 0; e < AP_SLOTS; e++) {
+        static wv_item ei;
+        static seeker_track ek;
+        int eb[4], ns = r->n_skel;
+        if (!anim_person_echo(e, &ei, &ek, eb, &r->fx))
+            continue;
+        draw_set_dash_phase(r->fx.march);
+        p_marks(r, &ei, &ek, eb);
+        draw_set_dash_phase(0);
+        r->n_skel = ns;
+    }
+    memset(&r->fx, 0, sizeof r->fx);
     int slot_l = 0, slot_r = 0;
     for (int pass = 0; pass < 3; pass++)
         for (int i = 0; i < n; i++) {
@@ -1426,8 +1452,11 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 continue;
             }
             if (it->in_fov && pass == it->direct) {
-                if (i < SEEKER_MAX_TRACKS)
+                if (i < SEEKER_MAX_TRACKS) {
+                    r->fx = anim_person_get(k->id);
                     p_label(r, it, k, box[i]);
+                    memset(&r->fx, 0, sizeof r->fx);
+                }
                 if (it->direct)
                     s->n_direct++;
                 else
@@ -1575,8 +1604,10 @@ void wv_render(canvas *c, const seeker_config *cfg, wv_view *v, const seeker_tra
     int n = wv_classify(t, &wc, &pose, items, SEEKER_MAX_TRACKS);
     if (w->pitch_auto && use_video)
         learn_tilt(v, &r.cam, t, items, n);
-    assign_levels(v, cfg, t, items, n, v->clock_ms ? v->clock_ms : seeker_now_ms());
+    int64_t now = v->clock_ms ? v->clock_ms : seeker_now_ms(); /* the frame's one timestamp */
+    assign_levels(v, cfg, t, items, n, now);
     if (r.plan) {
+        anim_person_begin(now, r.u);
         wv_plan(&r, v, t, items, n, &pose, s, use_video, other_node, video);
         return;
     }

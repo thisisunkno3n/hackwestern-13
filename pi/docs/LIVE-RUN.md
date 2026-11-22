@@ -436,6 +436,17 @@ cd ~/seeker/drafts/pi-lane && THEME=classic sh scripts/run-live.sh   # or HUD_AR
 
 Stale people are drawn faded rather than grey. The theme only changes drawing: tracking, the
 colour hysteresis and the fallback rules are the same as classic.
+
+Person arrivals and losses are animated in the plan camera view (display/anim_person.c), as
+decoration only: a person's frame or ghost is always drawn where they are on that frame. A new
+seen person: the whole frame shows faintly at once and its corners trace closed (180 ms), then the
+leader draws out (120 ms), then the plate fades and slides in (120 ms). A new person behind a wall:
+the ghost starts at 60% and is full in 150 ms, the hull hatch sweeps in from the bottom left
+(220 ms), then leader and plate. A person no longer drawn leaves a fading echo of their last frame or
+ghost for 220 ms (50% to 0, no plate). Hidden-person dashes march slowly (12 px/s). Someone who
+comes back within 2 s keeps their plate up. Words and distances are never animated.
+`tools/hud_shot --seq appear|xray|lost|all` renders the animations frame by frame (`--perf` times
+them); the stills are drawn settled.
 `tools/hud_shot` renders both themes of a made-up scene on a laptop (no phones, no Pi):
 `python3 tools/hud_shot_room.py room.png` then convert it to PPM and run
 `build/hud_shot --bg room.ppm --out shots/`.
