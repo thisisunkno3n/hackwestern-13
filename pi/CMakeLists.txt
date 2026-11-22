@@ -80,7 +80,7 @@ target_link_libraries(seeker_supervisor seeker_sv seeker_fusion_core) # seeker_p
 
 # Plan theme: drafting primitives, Atkinson Hyperlegible compiled in (third_party/atkinson, made by
 # tools/gen_hud_fonts.py) and drawn with stb_truetype.
-add_library(seeker_draw STATIC display/draw.c display/draw_font.c display/plan.c
+add_library(seeker_draw STATIC display/draw.c display/draw_font.c display/plan.c display/anim_map.c
   third_party/atkinson/hud_fonts.c)
 target_include_directories(seeker_draw PUBLIC display fusion)
 target_link_libraries(seeker_draw PUBLIC seeker_common)
@@ -130,6 +130,11 @@ if(NOT SEEKER_TARGET STREQUAL "qnx")
     display/hud_render.c fusion/seeker_pose.c)
   target_include_directories(hud_shot PRIVATE display fusion)
   target_link_libraries(hud_shot seeker_draw seeker_video seeker_common)
+  # Plan map animation sequences and timing (tools/hud_anim_map_shot.c, tools/anim_map_media.sh).
+  add_executable(hud_anim_map_shot tools/hud_anim_map_shot.c display/projection.c display/wearer_view.c
+    display/hud_render.c fusion/seeker_pose.c)
+  target_include_directories(hud_anim_map_shot PRIVATE display fusion)
+  target_link_libraries(hud_anim_map_shot seeker_draw seeker_video seeker_common)
 endif()
 target_compile_definitions(test_core PRIVATE SEEKER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_test(NAME core COMMAND test_core WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

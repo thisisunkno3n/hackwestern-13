@@ -28,6 +28,7 @@
  * display (a 4K monitor otherwise means 4x the pixels to draw, scale video into and copy).
  */
 
+#include "anim_map.h"
 #include "hud_render.h"
 #include "latency.h"
 #include "seeker_config.h"
@@ -439,6 +440,7 @@ int main(int argc, char **argv)
             video_why_ms = t0;
         }
         int64_t ru0 = seeker_now_us();
+        anim_map_frame(t0); /* the plan map animations' clock for this frame */
         int drawn = hud_render(&cv, &cfg, &st);
         float render_ms = (float)(seeker_now_us() - ru0) / 1000.0f;
         if (drawn != video_drawn) { /* the line scripts and operators wait for */

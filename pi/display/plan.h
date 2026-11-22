@@ -59,6 +59,8 @@ typedef struct {
     float x, y;         /* room position, or the ray's origin (the phone) */
     float ray_deg;      /* PLAN_RAY: room heading of the ray */
     char label[24];     /* full-screen plan only: e.g. "3.4 m" (distance from the wearer) */
+    int id;             /* fusion's track id (0: untracked), for the map animations (anim_map.h) */
+    int down;           /* posture down and fusion live: the slow repeating ring */
 } plan_mark;
 
 /* Plan of the room around the wearer in the rectangle (x, y, w, h): heading up, wearer at

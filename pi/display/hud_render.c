@@ -442,12 +442,14 @@ static void plan_full(ctx *x, float u, const char *camera)
         const seeker_track *k = &t->tracks[i];
         plan_mark *m = &marks[nm];
         memset(m, 0, sizeof *m);
+        m->id = k->id;
         int seen = node ? wv_seen_by(k->nodes, k->node_id, node) : 1;
         if (k->has_room) {
             float d = hypotf(k->room_x_m - pose.x_m, k->room_y_m - pose.y_m); /* from the wearer */
             int down = k->posture == SEEKER_POSTURE_DOWN;
             m->kind = seen ? PLAN_SEEN : PLAN_HIDDEN;
             m->close = !x->stale && (down || (seen && d < x->cfg->near_m));
+            m->down = !x->stale && down;
             m->x = k->room_x_m;
             m->y = k->room_y_m;
             snprintf(m->label, sizeof m->label, "%.1f m%s", d,

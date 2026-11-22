@@ -2,6 +2,7 @@
  * the fusion rules, the IF-5.6 video path (SKV2 framing, JPEG decode, letterbox scale, TCP
  * receiver) and the EagleEye wearer view (projection, x-ray classification, mirror). */
 
+#include "anim_map.h"
 #include "hud_render.h"
 #include "latency.h"
 #include "plan.h"
@@ -3597,6 +3598,240 @@ static void test_plan_render(void)
     free(c.px);
 }
 
+/* ---- plan map animations (display/anim_map.h) ---- */
+
+static wv_config g_am_wc;
+static wv_pose g_am_pose;
+
+/* The full-screen plan of `marks` at time `t` (0: no clock), wall straight ahead, no phones. */
+static void am_draw(canvas *c, int64_t t, const plan_mark *marks, int n, int walls)
+{
+    anim_map_frame(t);
+    draw_clear(c, P_GROUND);
+    g_am_wc.n_walls = walls;
+    plan_map(c, plan_u(c), 0, 0, c->w, c->h, 40.0f, 0.8f, 0, &g_am_pose, "R1", 66.0f, &g_am_wc, NULL, marks, n);
+}
+
+/* Pixels that differ between a and b inside the box. */
+static int am_diff(const canvas *a, const canvas *b, int x0, int x1, int y0, int y1)
+{
+    int n = 0;
+    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < a->h; y++)
+        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < a->w; x++)
+            n += a->px[y * a->stride + x] != b->px[y * b->stride + x];
+    return n;
+}
+
+static plan_mark am_mark(int id, int kind, float x, float y, int down)
+{
+    plan_mark m;
+    memset(&m, 0, sizeof m);
+    m.id = id;
+    m.kind = kind;
+    m.x = x;
+    m.y = y;
+    m.down = down;
+    m.close = down;
+    return m;
+}
+
+static void test_anim_map(void)
+{
+    const int W = 640, H = 360;
+    canvas a = { calloc((size_t)W * H, 4), W, H, W }, b = { calloc((size_t)W * H, 4), W, H, W };
+    CHECK(a.px && b.px);
+    if (!a.px || !b.px)
+        return;
+    memset(&g_am_wc, 0, sizeof g_am_wc);
+    wv_config_defaults(&g_am_wc);
+    g_am_wc.walls[0][0] = -1.0f; /* 2 m wall 2 m ahead */
+    g_am_wc.walls[0][1] = 2.0f;
+    g_am_wc.walls[0][2] = 1.0f;
+    g_am_wc.walls[0][3] = 2.0f;
+    memset(&g_am_pose, 0, sizeof g_am_pose);
+    const int64_t T = 50000;
+    /* Screen of a room point: wearer at (W/2 - 1, 0.8 H), 40 px per m, heading up (plan.c). */
+#define AM_SX(x) (W / 2 + (int)lroundf((x) * 40.0f))
+#define AM_SY(y) ((int)lroundf(H * 0.8f) - (int)lroundf((y) * 40.0f))
+    CHECK(anim_map_enabled());
+
+    /* Disabled, and enabled with no clock, both draw exactly the unanimated plan, mid-animation. */
+    plan_mark mk[3] = { am_mark(1, PLAN_SEEN, -0.5f, 3.0f, 0), am_mark(2, PLAN_HIDDEN, 0.6f, 3.2f, 0),
+                        am_mark(3, PLAN_SEEN, -4.0f, 1.0f, 1) };
+    anim_map_reset();
+    am_draw(&b, 0, mk, 3, 1); /* reference: no clock */
+    anim_map_set_enabled(0);
+    for (int64_t dt = 0; dt <= 3000; dt += 150) {
+        am_draw(&a, T + dt, mk, 3, 1);
+        CHECK(am_diff(&a, &b, 0, W, 0, H) == 0);
+    }
+    anim_map_set_enabled(1);
+    anim_map_reset();
+    am_draw(&a, 0, mk, 3, 1);
+    CHECK(am_diff(&a, &b, 0, W, 0, H) == 0);
+
+    /* First frame: every marker is there at full strength, the wall is not drawn yet. */
+    anim_map_reset();
+    am_draw(&a, T, mk, 3, 1);
+    int sx = AM_SX(-0.5f), sy = AM_SY(3.0f);
+    CHECK(a.px[sy * W + sx] == P_INK && b.px[sy * W + sx] == P_INK);
+    int hid_a = count_near_rgb(&a, P_HIDDEN, 90, AM_SX(0.6f) - 4, AM_SX(0.6f) + 5, AM_SY(3.2f) - 4, AM_SY(3.2f) + 5);
+    int hid_b = count_near_rgb(&b, P_HIDDEN, 90, AM_SX(0.6f) - 4, AM_SX(0.6f) + 5, AM_SY(3.2f) - 4, AM_SY(3.2f) + 5);
+    printf("anim map: first frame hidden square %d px (unanimated %d)\n", hid_a, hid_b);
+    CHECK(hid_a > 6 && hid_a * 2 > hid_b);
+    int wall_now = am_diff(&a, &b, AM_SX(-0.8f), AM_SX(0.8f), AM_SY(2.0f) - 2, AM_SY(2.0f) + 3);
+    printf("anim map: first frame, %d wall px still to draw\n", wall_now);
+    CHECK(wall_now > 40);
+    /* Draw-in done by 300 ms: the wall equals the settled plan. */
+    am_draw(&a, T + 320, mk, 3, 1);
+    CHECK(am_diff(&a, &b, AM_SX(-0.8f), AM_SX(0.8f), AM_SY(2.0f) - 2, AM_SY(2.0f) + 3) == 0);
+
+    /* Ping: one person off to the side (outside the cone's scan), no walls. A ring around them
+     * while 0..450 ms old, nothing after; the square itself is drawn every frame. */
+    plan_mark p1 = am_mark(7, PLAN_SEEN, -4.0f, 1.0f, 0);
+    int px = AM_SX(-4.0f), py = AM_SY(1.0f), R = 30;
+    anim_map_reset();
+    am_draw(&b, 0, &p1, 1, 0);
+    am_draw(&a, T - 1000, NULL, 0, 0); /* the map already up, empty */
+    am_draw(&a, T, &p1, 1, 0);
+    CHECK(a.px[py * W + px] == P_INK);
+    am_draw(&a, T + 200, &p1, 1, 0);
+    int ring = am_diff(&a, &b, px - R, px + R, py - R, py + R);
+    am_draw(&a, T + 460, &p1, 1, 0);
+    int after = am_diff(&a, &b, px - R, px + R, py - R, py + R);
+    printf("anim map: ping %d px at 200 ms, %d at 460 ms\n", ring, after);
+    CHECK(ring > 20 && after == 0);
+    /* Still on the map a second later: no new ping. */
+    am_draw(&a, T + 1200, &p1, 1, 0);
+    am_draw(&a, T + 1300, &p1, 1, 0);
+    CHECK(am_diff(&a, &b, px - R, px + R, py - R, py + R) == 0);
+    /* Gone over a second, then the id comes back (or is reused): it pings again. */
+    for (int64_t t = T + 1400; t <= T + 2600; t += 100)
+        am_draw(&a, t, NULL, 0, 0);
+    am_draw(&a, T + 2700, &p1, 1, 0);
+    am_draw(&a, T + 2900, &p1, 1, 0);
+    CHECK(am_diff(&a, &b, px - R, px + R, py - R, py + R) > 20);
+    /* A one-frame dropout does not. */
+    am_draw(&a, T + 3500, &p1, 1, 0);
+    am_draw(&a, T + 3600, NULL, 0, 0);
+    am_draw(&a, T + 3700, &p1, 1, 0);
+    CHECK(am_diff(&a, &b, px - R, px + R, py - R, py + R) == 0);
+    /* Untracked (id 0) and the table full of other ids: no crash, a new id still pings. */
+    static plan_mark many[100];
+    for (int i = 0; i < 100; i++)
+        many[i] = am_mark(1000 + i, PLAN_SEEN, 3.0f, 1.0f, 0);
+    am_draw(&a, T + 3800, many, 100, 0);
+    plan_mark p0 = am_mark(0, PLAN_SEEN, -4.0f, 1.0f, 0), p9 = am_mark(9, PLAN_SEEN, -4.0f, 1.0f, 0);
+    am_draw(&a, T + 3900, &p0, 1, 0);
+    am_draw(&a, T + 4000, &p0, 1, 0);
+    CHECK(am_diff(&a, &b, px - R, px + R, py - R, py + R) == 0);
+    am_draw(&a, T + 4100, &p9, 1, 0);
+    am_draw(&a, T + 4300, &p9, 1, 0);
+    CHECK(am_diff(&a, &b, px - R, px + R, py - R, py + R) > 20);
+
+    /* Down: a ring every 1.4 s from going down, quiet in between (frames every 100 ms). */
+    plan_mark d = am_mark(7, PLAN_SEEN, -4.0f, 1.0f, 1);
+    anim_map_reset();
+    am_draw(&b, 0, &d, 1, 0);
+    p1.id = 7;
+    for (int64_t t = T; t < T + 1000; t += 100)
+        am_draw(&a, t, &p1, 1, 0); /* standing first */
+    int pulses = 0, quiets = 0;
+    for (int64_t t = T + 1000; t < T + 1000 + 4 * 1400; t += 100) {
+        am_draw(&a, t, &d, 1, 0);
+        int ph = (int)((t - T - 1000) % 1400), n = am_diff(&a, &b, px - 40, px + 40, py - 40, py + 40);
+        if (ph == 300) {
+            pulses += n > 20;
+            if (t == T + 1300)
+                printf("anim map: down ring %d px at +300 ms\n", n);
+        } else if (ph >= 1000)
+            quiets += n == 0;
+    }
+    CHECK(pulses == 4 && quiets == 4 * 4);
+    /* Up again: no more rings. */
+    for (int64_t t = T + 6600; t <= T + 8000; t += 100)
+        am_draw(&a, t, &p1, 1, 0);
+    memcpy(b.px, a.px, (size_t)W * H * 4);
+    am_draw(&a, T + 8100, &p1, 1, 0);
+    am_draw(&a, T + 8500, &p1, 1, 0);
+    CHECK(am_diff(&a, &b, px - 40, px + 40, py - 40, py + 40) == 0);
+
+    /* Hidden dashes march: the square changes over time, stays the same at the same time. */
+    plan_mark h = am_mark(8, PLAN_HIDDEN, -4.0f, 1.0f, 0);
+    anim_map_reset();
+    am_draw(&a, T, &h, 1, 0);
+    am_draw(&a, T + 1000, &h, 1, 0);
+    am_draw(&b, T + 1200, &h, 1, 0);
+    CHECK(am_diff(&a, &b, px - 8, px + 8, py - 8, py + 8) > 0);
+    am_draw(&a, T + 1200, &h, 1, 0);
+    CHECK(am_diff(&a, &b, 0, W, 0, H) == 0); /* same time, same pixels */
+
+    /* Scan: a faint line inside the cone at some moments, none in the still part of the period. */
+    anim_map_reset();
+    am_draw(&b, 0, NULL, 0, 0);
+    am_draw(&a, T, NULL, 0, 0);
+    int scan_on = 0;
+    for (int64_t t = T + 400; t < T + 2000; t += 100) {
+        am_draw(&a, t, NULL, 0, 0);
+        scan_on += am_diff(&a, &b, 0, W, 0, H) > 30;
+    }
+    am_draw(&a, T + 300 + 3000 - 500, NULL, 0, 0);
+    CHECK(scan_on >= 12 && am_diff(&a, &b, 0, W, 0, H) == 0);
+
+    /* Through hud_render: the full-screen plan's first frame has the person square already. */
+    static seeker_config cfg;
+    seeker_config_defaults(&cfg);
+    static wv_view v;
+    memset(&v, 0, sizeof v);
+    wv_config_defaults(&v.cfg);
+    snprintf(v.cfg.node, sizeof v.cfg.node, "R1");
+    v.cfg.pose_src = WV_POSE_STATIC;
+    v.cfg.radar_fallback = 1;
+    static seeker_tracks t;
+    memset(&t, 0, sizeof t);
+    add_node(&t, "R1", "ok", 0, 0, 0);
+    seeker_track *k = add_track(&t, "R1", "R1", 1, -4.0f, 1.0f); /* off to the side: no scan there */
+    k->id = 5;
+    k->posture = SEEKER_POSTURE_DOWN;
+    hud_state hs;
+    memset(&hs, 0, sizeof hs);
+    hs.t = &t;
+    hs.tracks_age_ms = 10;
+    hs.background = "wearer";
+    hs.view_node = "R1";
+    hs.wearer = &v;
+    hs.video_state = VIDEO_LOST;
+    draw_set_theme(DRAW_THEME_PLAN);
+    anim_map_reset();
+    anim_map_frame(T);
+    hud_render(&a, &cfg, &hs);
+    float u = plan_u(&a);
+    int m24 = (int)lroundf(24 * u), hh = H - 2 * m24 - plan_title_h(u) - (int)lroundf(16 * u);
+    float ppm = ((float)hh * 0.72f - 40 * u) / 6.0f, fay = (float)m24 + (float)(int)lroundf((float)hh * 0.72f);
+    int qx = W / 2 + (int)lroundf(-4.0f * ppm), qy = (int)lroundf(fay - 1.0f * ppm);
+    CHECK(count_rgb(&a, P_RED, qx - 3, qx + 3, qy - 3, qy + 3) > 4); /* down: red, first frame */
+    for (int64_t t = T + 100; t <= T + 1200; t += 100) {
+        if (t == T + 1200)
+            memcpy(b.px, a.px, (size_t)W * H * 4); /* T + 1100: between rings */
+        anim_map_frame(t);
+        hud_render(&a, &cfg, &hs);
+    }
+    CHECK(am_diff(&a, &b, qx - 30, qx + 30, qy - 30, qy + 30) == 0);
+    for (int64_t t = T + 1300; t <= T + 1700; t += 100) {
+        anim_map_frame(t);
+        hud_render(&a, &cfg, &hs);
+    }
+    int hr = am_diff(&a, &b, qx - 30, qx + 30, qy - 30, qy + 30); /* T + 1700: second ring */
+    printf("anim map: hud_render down ring %d px\n", hr);
+    CHECK(hr > 20);
+    draw_set_theme(DRAW_THEME_CLASSIC);
+#undef AM_SX
+#undef AM_SY
+    anim_map_reset();
+    free(a.px);
+    free(b.px);
+}
+
 /* ---- threat colour hysteresis (common/seeker_colour.h) ---- */
 
 /* The colour before this fix: red under near_m or while an EMA of tick-to-tick range change is
@@ -4719,6 +4954,7 @@ int main(void)
     test_skel_render();
     test_plan_primitives();
     test_plan_render();
+    test_anim_map();
     test_colour_hysteresis();
     test_posture();
     test_calibration_and_freeze();

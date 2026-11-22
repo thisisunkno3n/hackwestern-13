@@ -1449,6 +1449,8 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 continue;
             plan_mark *m = &marks[nm];
             memset(m, 0, sizeof *m);
+            m->id = k->id;
+            m->down = !p_stale(r, k) && p_down(k);
             if (k->has_room) {
                 m->kind = it->direct ? PLAN_SEEN : PLAN_HIDDEN;
                 m->close = p_alarm(r, it, k);
