@@ -1,0 +1,265 @@
+#ifndef SEEKER_FUSION_H
+#define SEEKER_FUSION_H
+
+/*
+ * hud_fusion core, kept free of sockets so tests can drive it with fake clocks.
+ * Tracks each node_id separately and marks a node LOST after cfg->drop_ms (1500) without a
+ * datagram, by receive time (IF-5.4). Each contact becomes a ray from its node's pose; rays from
+ * different nodes that meet are triangulated into one track (seeker_triangulate.h), and the fix is
+ * placed in the room frame (IF-1) and then in the wearer's frame. A lone contact without a range
+ * keeps only its node bearing.
+ *
+ * Track identity: every tick, fixes are assigned to live tracks (output within the last drop_ms)
+ * by predicted position (alpha-beta velocity, gated, minimum total cost, one fix per track), so
+ * two people who pass close by keep their ids even when the phones' contact labels swap. A track
+ * with no fix this tick coasts (kept, not sent) for drop_ms. A fix no live track takes reuses the
+ * track that last had its label (so a node back from LOST keeps its ids), else gets a new id.
+ * Two contacts of one node are never fused into one track.
+ *
+ * Skeleton: a track whose primary contact carries pts (phone.html, PR #7) gets them in
+ * person-height units from the mid-hip, scaled by the smoothed distance from that phone, and
+ * smoothed per joint in its track memory (seeker_skel.h). Only placed tracks (with a room fix)
+ * carry one; the encoder caps how many go out per datagram.
+ *
+ * Smoothing (fusion.smooth): a triangulated or parallel-fallback fix runs through a room-frame
+ * alpha-beta filter; a single-node mono range point runs through a range-only filter instead
+ * (fusion.range_smooth), so the noisy size range is smoothed along the ray while the bearing,
+ * which is already accurate, is not delayed.
+ *
+ * Node pose precedence: a pinned pose (hud_fusion --pose / --poses) always wins; otherwise a
+ * message pose replaces the remote.nodes pose unless remote.pose_source is "config". A message
+ * with pose null keeps the last pose (pose_src "held" after a full message pose).
+ *
+ * Tag frames. Tag 0 is the room origin. A message pose may name the tag it was measured from
+ * (pose.tag_id, phone.html ?tag=1&tagid=0,7): tag 0 is the room frame as is, another tag is
+ * moved into the room frame with its room pose (seeker_fusion_set_tag, hud_fusion --tag-pose),
+ * and a tag with no room pose counts as pose null (the node holds). A pose with no tag_id is in
+ * the room frame, unless the node has a tag frame (seeker_fusion_set_tag_frame, hud_fusion
+ * --tag-frame: the phone sees only one tag, e.g. ?tagid=7, and does not name it). Either way the
+ * room-frame pose then goes through the jump gate and the hold, so a switch between tags whose
+ * room poses disagree by more than the gate is taken after SEEKER_POSE_JUMP_N consistent frames.
+ * A node with a tag frame is never pinned, and takes message poses even with remote.pose_source
+ * "config".
+ */
+
+#include "seeker_colour.h"
+#include "seeker_config.h"
+#include "seeker_msgs.h"
+#include "seeker_pose.h"
+#include "seeker_posture.h"
+#include "seeker_skel.h"
+#include "seeker_triangulate.h"
+
+typedef enum { NODE_WAIT = 0, NODE_OK, NODE_LOST } seeker_node_state;
+
+typedef struct {
+    char id[SEEKER_NODE_LEN];
+    seeker_node_state state;
+    int64_t last_rx_ms;
+    int64_t first_rx_ms;
+    long msgs;
+    float rate_hz; /* smoothed receive rate */
+    float x_m, y_m, yaw_deg, hfov_deg;
+    int image_w, image_h;
+    seeker_remote_contacts last;
+    int pose_pinned;  /* 1: message poses are ignored for this node */
+    char pose_src[8]; /* "config", "init", "file", "cli", "message", "partial", "default", or
+                       * "held": the node sent a full pose, then pose null (tag out of view);
+                       * the last full pose is kept */
+    int warned_zero_pose;
+    int pose_jumps;   /* consecutive live poses rejected by the jump gate */
+    seeker_pose jump_pose; /* the last of them */
+    int oe_valid;               /* live-pose One Euro state (pose_smooth) */
+    float oe_dx, oe_dy, oe_dyaw; /* filtered speed, m/s and deg/s */
+    int64_t oe_ms;
+    int has_pitch;         /* the phone sent its camera tilt (pitch_deg), at pitch_ms */
+    float pitch_deg;
+    int64_t pitch_ms;
+    float range_k;         /* multiplies the phone's range_m (hud_fusion --range-scale, FOV rescale) */
+    float cam_h, cam_pitch; /* camera height (m, 0: unknown) and tilt (deg, up +) for the
+                             * ground-plane range check (hud_fusion --cam-h, --cam-pitch) */
+    int64_t ground_log_ms;
+    unsigned flip_hist;    /* tag flips: bit i set when live pose i back was the mirror solution */
+    int reacq_have;        /* back after a loss: first pose seen, waiting for one that agrees */
+    seeker_pose reacq;     /* that pose (room), and when */
+    int64_t reacq_ms;
+    long reacqs;           /* poses taken back after a loss (logs, tests) */
+    long flips;            /* mirror solutions replaced by their mirror (logs) */
+    int has_tag_frame;     /* 1: untagged message poses are in tag_frame's tag frame */
+    seeker_pose tag_frame; /* room pose of the tag this node's phone locates itself from */
+    int last_tag;          /* pose.tag_id of the last pose taken, -1 untagged */
+    /* Moving wearer without a tag in view (seeker_fusion_tick): */
+    int has_home;          /* home: the --init-pose (WEARER_POSE), eased to after pose_home_ms */
+    seeker_pose home;
+    int64_t held_ms;       /* when the last live pose was lost */
+    int has_head_off;      /* room yaw minus compass heading, learned while tag poses arrive */
+    float head_off;
+    int blending;          /* easing the pose toward target (back from a hold, or home) */
+    int blend_yaw;         /* the blend also moves the yaw (not when the compass drives it) */
+    seeker_pose target;
+    int64_t blend_ms, blend_start_ms;
+    float hfov_set;        /* hud_fusion --hfov: the phone's real horizontal FOV (deg), 0 = trust
+                            * the phone; with hfov_preset, landscape and portrait values */
+    float hfov_set_portrait;
+    int warned_tag;        /* unknown tag id last logged, -1 none */
+} seeker_fusion_node;
+
+#define SEEKER_MAX_TAGS 16
+
+typedef struct {
+    int id;
+    seeker_pose pose; /* the tag's room pose (seeker_pose_from_tag) */
+} seeker_fusion_tag;
+
+/* Jump gate on live message poses: a full pose more than SEEKER_POSE_JUMP_M or
+ * SEEKER_POSE_JUMP_DEG away from the current live pose is ignored until SEEKER_POSE_JUMP_N of them
+ * arrive in a row, each within the same limits of the one before. One-frame flips of the phone's marker pose (planar POSIT picks the mirror
+ * solution) then never move the wearer; a real move still lands within 3 messages (~200 ms). */
+#define SEEKER_POSE_JUMP_M 0.75f
+#define SEEKER_POSE_JUMP_DEG 30.0f
+#define SEEKER_POSE_JUMP_N 3
+/* A flat tag seen from off its axis has two camera poses that fit the image almost equally well
+ * (planar pose ambiguity; js-aruco2 POSIT keeps the "best" one, which flips with noise). On the
+ * floor the second one is the first mirrored across the tag's normal, at the same range, with
+ * the tag at the same place in the picture: in the tag's frame (x, y, yaw) -> (-x, y, yaw - 2b),
+ * b the bearing from the camera to the tag. A live pose that jumped but whose mirror lands
+ * within SEEKER_POSE_FLIP_M / SEEKER_POSE_FLIP_DEG of the node is taken as that mirror (the same
+ * place, solved the other way). Only when SEEKER_POSE_FLIP_SWITCH of the last
+ * SEEKER_POSE_FLIP_WINDOW live poses were mirrors does the node switch to the other solution. */
+/* Back from a loss of SEEKER_POSE_REACQ_MS or more (pose null, tag out of view): the filters
+ * and flip history start over, and the pose is taken once two in a row agree (directly or as
+ * mirrors, within SEEKER_POSE_FLIP_M / SEEKER_POSE_FLIP_DEG), or after SEEKER_POSE_REACQ_WAIT_MS
+ * anyway: the first frames with the tag at the picture's edge are the worst. */
+#define SEEKER_POSE_REACQ_MS 1000
+#define SEEKER_POSE_REACQ_WAIT_MS 600
+#define SEEKER_POSE_FLIP_M 0.45f
+#define SEEKER_POSE_FLIP_DEG 15.0f
+#define SEEKER_POSE_FLIP_WINDOW 10
+#define SEEKER_POSE_FLIP_SWITCH 8
+/* Live (tag) poses are noisy: a few cm and a few degrees per frame from ArUco at 2 m, and the
+ * HUD's wearer-centred map turns that into a shaking room (a phone 4 m away moves 0.2 m per 3
+ * deg). One Euro filter on x, y and yaw: a low cutoff standing still, opening with the filtered
+ * speed (per m/s, per deg/s) so walking and turning follow. */
+#define SEEKER_POSE_MIN_CUTOFF_HZ 0.4f
+#define SEEKER_POSE_BETA_M 0.6f     /* Hz per m/s */
+#define SEEKER_POSE_BETA_DEG 0.012f /* Hz per deg/s */
+#define SEEKER_POSE_D_CUTOFF_HZ 1.0f
+
+/* Constant-velocity alpha-beta filter on a room position (m, m/s). */
+typedef struct {
+    int valid;
+    float x, y, vx, vy;
+} seeker_ab;
+
+/* Constant-velocity alpha-beta filter on one node's range to a contact (m, m/s). */
+typedef struct {
+    int valid;
+    float r, v;
+} seeker_rf;
+
+typedef struct {
+    char label[SEEKER_ID_LEN];
+    int id;
+    seeker_colour colour; /* range trend, approach speed and threat colour (seeker_colour.h) */
+    int64_t seen_ms;
+    seeker_ab ab;
+    long ab_seq;       /* sum of the source nodes' message counts at the last filter update */
+    int64_t ab_msg_ms; /* primary node's message clock (t_mono_ms or ts_ms) at that update */
+    int64_t ab_rx_ms;  /* Pi receive time of that update */
+    seeker_rf rf;      /* range filter, while the track is a single-node mono range point */
+    int pv_valid;      /* glide velocity (fusion.predict_ms): from successive filtered */
+    float pvx, pvy;    /* positions, so it covers sideways motion of a one-phone track too */
+    float pv_x, pv_y;  /* filtered position at the last update */
+    long dbg_seq;      /* message count at the last --debug track line */
+    int has_pos;       /* px, py hold its last room position (sent at pos_ms) */
+    float px, py;
+    int64_t pos_ms;
+    int matched;       /* taken by a cluster this tick */
+    seeker_skel skel;  /* smoothed ghost skeleton of the primary contact (seeker_skel.h) */
+    seeker_posture posture; /* STAND / CROUCH / DOWN from that skeleton (seeker_posture.h) */
+} seeker_fusion_mem;
+
+#define SEEKER_FUSION_MEM 32
+
+typedef struct {
+    const seeker_config *cfg;
+    int n_nodes;
+    seeker_fusion_node nodes[SEEKER_MAX_NODES];
+    seeker_fusion_mem mem[SEEKER_FUSION_MEM];
+    int next_id;
+    int64_t tick;
+    int debug; /* log filter snaps and one line per track per new datagram */
+    int pose_gate; /* 1 (init default): jump gate on live message poses */
+    int skel_smooth; /* 1 (init default): One Euro on skeleton joints; 0 passes them raw */
+    int pose_blend;  /* 1 (init default): a pose back from a hold eases in; 0 jumps (old) */
+    int pose_smooth; /* 1 (init default): live message poses are smoothed (One Euro) */
+    int pose_flip;   /* 1 (init default): tag pose flips are caught (SEEKER_POSE_FLIP_*) */
+    int range_hfov;  /* 1 (init default): box-height ranges rescaled with --hfov's real FOV */
+    float person_h;  /* people's height in m for box-height range (0: phone.html's 1.7) */
+    int ground_range; /* 1: a node with cam_h also ranges from the feet row (averaged in) */
+    int n_tags;    /* room poses of tags other than 0 (hud_fusion --tag-pose) */
+    seeker_fusion_tag tags[SEEKER_MAX_TAGS];
+    seeker_tri_opts tri; /* triangulation tuning; init copies assoc_m and the fusion.tri_* keys */
+} seeker_fusion;
+
+void seeker_fusion_init(seeker_fusion *f, const seeker_config *cfg);
+/* Sets a node's pose (adding the node if it is not configured). pin = 1 keeps it over message
+ * poses. src names the origin for logs ("cli", "file"). Returns the node index or -1 if full. */
+int seeker_fusion_set_pose(seeker_fusion *f, const char *id, const seeker_pose *p, const char *src,
+                           int pin);
+/* Message poses from node id are in the frame of a tag at room pose tag (adding the node if it is
+ * not configured). Unpins the node and starts it 2 m in front of that tag, facing it (pose_src
+ * "init"; a later seeker_fusion_set_pose with pin 0 replaces the start). Returns the node index or
+ * -1 if full. */
+int seeker_fusion_set_tag_frame(seeker_fusion *f, const char *id, const seeker_pose *tag);
+/* Room pose of ArUco tag tag_id, for message poses that name it in pose.tag_id. Returns 0, or -1
+ * if tag_id is not > 0 (tag 0 is the room origin) or the table is full. */
+int seeker_fusion_set_tag(seeker_fusion *f, int tag_id, const seeker_pose *room);
+
+/* The phone's real horizontal FOV, from a number of degrees or a preset name (see
+ * seeker_hfov_preset). Every bearing the node sends was computed on the phone with the FOV it
+ * reports (hfov_deg, phone.html ?hfov=, default 66): it is rescaled to the real one,
+ * tan(b') = tan(b) tan(real / 2) / tan(sent / 2), and the node's FOV (view cone, wearer
+ * projection) becomes the real one. Returns the node index, or -1 for an unknown preset or a
+ * full table. */
+int seeker_fusion_set_hfov(seeker_fusion *f, const char *id, const char *spec);
+/* Where node `id` sits as seen from node `from` (its pose now): metres to its right (negative:
+ * left) and ahead (negative: behind). Returns 0, or -1 if either node is unknown. */
+/* Multiplies node id's box-height ranges by k (0.2..5). Returns 0, or -1. */
+int seeker_fusion_set_range_scale(seeker_fusion *f, const char *id, float k);
+/* Camera height (m) and tilt (deg, up positive) of node id, for the ground-plane range: distance
+ * from how far below the horizon the feet are. Returns 0, or -1. */
+int seeker_fusion_set_cam(seeker_fusion *f, const char *id, float cam_h, float pitch_deg);
+/* Ground-plane range of a person whose feet are at image row v_feet (px) in a w x h frame with
+ * the given horizontal FOV, from a camera cam_h above the floor tilted pitch_deg up; 0 when the
+ * feet are not below the horizon. */
+float seeker_ground_range(float v_feet, int w, int h, float hfov_deg, float cam_h, float pitch_deg);
+int seeker_fusion_relative(const seeker_fusion *f, const char *from, const char *id, float *right_m,
+                           float *ahead_m);
+/* Horizontal FOV estimates for a 4:3 640x480 Safari stream, from Apple's 35 mm-equivalent focal
+ * lengths over the full sensor width (diagonal 43.27 mm, 4:3 frame 34.6 x 26.0 mm):
+ * "iphone17pro" (Fusion Main 24 mm) 71.6 landscape / 56.8 portrait, "iphone16" (Fusion Main
+ * 26 mm) 67.3 / 53.1, "iphone-ultrawide" (13 mm) 106.2 / 89.9. Estimates: a cropped video mode
+ * narrows them; check with a person at a taped bearing (docs/LIVE-RUN.md). Returns 0, or -1. */
+int seeker_hfov_preset(const char *name, float *landscape, float *portrait);
+/* Feeds one decoded datagram received at now_ms. Returns the node index, or -1 if the node table
+ * is full. Logs "NODE Rn resumed" when a LOST node comes back. */
+int seeker_fusion_ingest(seeker_fusion *f, const seeker_remote_contacts *m, int64_t now_ms);
+/* Applies the LOST rule and builds the outgoing tracks message. */
+void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out);
+
+/* One filter step with measurement (zx, zy) taken dt_s after the previous one. dt is clamped to
+ * [5 ms, cfg->smooth_max_dt_ms]. An invalid state, or a measurement farther than
+ * cfg->smooth_gate_m from the prediction, snaps to the measurement with zero velocity: returns 1
+ * then, else 0. */
+int seeker_ab_update(seeker_ab *s, float zx, float zy, float dt_s, const seeker_config *cfg);
+/* Same for a single-node track's range: gains cfg->range_smooth_alpha and range_smooth_beta, and
+ * a snap gate of max(cfg->smooth_gate_m, cfg->range_smooth_gate_frac * predicted range). */
+int seeker_range_update(seeker_rf *s, float z, float dt_s, const seeker_config *cfg);
+
+/* Geometry helpers (exposed for tests). Angles in degrees, clockwise from +y. */
+void seeker_node_to_room(float nx, float ny, float nyaw, float bearing, float range, float *x,
+                         float *y);
+float seeker_wrap180(float deg);
+
+#endif

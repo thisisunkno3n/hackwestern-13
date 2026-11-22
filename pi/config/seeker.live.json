@@ -1,0 +1,52 @@
+{
+  "remote": {
+    "drop_ms": 1500,
+    "assoc_m": 0.8,
+    "pose_source": "message",
+    "nodes": [
+      { "id": "R1", "x_m": 0.0, "y_m": -2.0, "yaw_deg": 0.0, "hfov_deg": 66.0, "image_w": 640, "image_h": 480 },
+      { "id": "R2", "x_m": 0.0, "y_m": 2.0, "yaw_deg": 180.0, "hfov_deg": 66.0, "image_w": 640, "image_h": 480 }
+    ]
+  },
+  "colours": { "near_m": 2.0, "mid_m": 5.0, "closing_mps": 0.5, "stale_ms": 500, "remote_by_range": true },
+  "display": {
+    "sink": "screen",
+    "background": "wearer",
+    "view_node": "R1",
+    "mirror": "none",
+    "line_px": 3,
+    "radar_m": 8.0,
+    "size": [1920, 1080],
+    "fps": 30,
+    "swap_rb": false,
+    "display_index": 0,
+    "wearer": {
+      "node": "R1",
+      "pose": [0.0, -2.0, 0.0],
+      "pose_source": "auto",
+      "hfov_deg": 66.0,
+      "image_w": 640,
+      "image_h": 480,
+      "cam_h_m": 1.7,
+      "assoc_deg": 6.0,
+      "visor": false,
+      "inset": true,
+      "video_fallback": "radar",
+      "walls": []
+    }
+  },
+  "fusion": { "rate_hz": 30, "tracks_host": "127.0.0.1", "wearer_yaw_deg": 0.0, "wearer_node": "R1" },
+  "prio": {
+    "hud_display": { "prio": 50, "policy": "fifo" },
+    "hud_supervisor": { "prio": 45, "policy": "fifo" },
+    "hud_fusion": { "prio": 30, "policy": "rr" },
+    "hud_low": 10
+  },
+  "health": { "beat_ms": 100, "dead_ms": 500, "backoff_ms": 500 },
+  "supervisor": {
+    "children": [
+      { "name": "hud_fusion", "argv": ["build/hud_fusion", "--config", "config/seeker.live.json"] },
+      { "name": "hud_display", "argv": ["build/hud_display", "--config", "config/seeker.live.json", "--view", "wearer"] }
+    ]
+  }
+}

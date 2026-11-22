@@ -1,0 +1,6 @@
+# Demo room phone poses, pinned in hud_fusion. Used by scripts/seeker_supervisor.sh and
+# scripts/run_demo.sh (POSES=config/poses by default) and by hud_supervisor via config/seeker.json.
+# Format and room frame: config/poses.example. Measure R1 and R2 with a tape at the venue and
+# edit these two lines; they must match each phone's real position and camera direction.
+R1=-2.0,3.0,145   # front left corner, looking back toward the wearer's mark
+R2=2.0,3.0,215    # front right corner, looking back toward the wearer's mark

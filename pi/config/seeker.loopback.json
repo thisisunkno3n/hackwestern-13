@@ -1,0 +1,25 @@
+{
+  "remote": {
+    "drop_ms": 1500,
+    "assoc_m": 0.8,
+    "pose_source": "message",
+    "nodes": [
+      { "id": "R1", "x_m": -2.0, "y_m": 3.0, "yaw_deg": 145.0, "hfov_deg": 60.0, "image_w": 1280, "image_h": 720 },
+      { "id": "R2", "x_m": 2.0, "y_m": 3.0, "yaw_deg": 215.0, "hfov_deg": 60.0, "image_w": 1280, "image_h": 720 }
+    ]
+  },
+  "display": { "sink": "ppm", "background": "radar", "view_node": "R1", "size": [1280, 720], "fps": 30 },
+  "fusion": { "rate_hz": 30, "tracks_host": "127.0.0.1" },
+  "prio": {
+    "hud_display": { "prio": 50, "policy": "fifo" },
+    "hud_supervisor": { "prio": 45, "policy": "fifo" },
+    "hud_fusion": { "prio": 30, "policy": "rr" }
+  },
+  "health": { "beat_ms": 100, "dead_ms": 500, "backoff_ms": 500 },
+  "supervisor": {
+    "children": [
+      { "name": "hud_fusion", "argv": ["build/hud_fusion", "--config", "config/seeker.loopback.json", "--debug"] },
+      { "name": "hud_display", "argv": ["build/hud_display", "--config", "config/seeker.loopback.json", "--ppm", "logs/hud.ppm", "--ppm-every", "15"] }
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+<!doctype html>
+<!-- Millisecond stopwatch for the camera -> HUD latency photo (docs/LIVE-RUN.md "Latency").
+     Open it on the Mac (double-click, no server needed), full screen, next to the HUD monitor.
+     Big digits redraw on every display refresh (60 Hz: each reading is good to about 17 ms). -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Seeker stopwatch</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #fff; overflow: hidden;
+               font-family: Menlo, Consolas, monospace; }
+  #t { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+       font-size: 22vw; font-weight: bold; letter-spacing: 0.02em; white-space: nowrap; }
+  #bar { position: absolute; bottom: 0; left: 0; height: 6vh; background: #ff8c00; }
+  #hint { position: absolute; top: 1vh; left: 1vw; font-size: 2vw; color: #888; }
+</style>
+</head>
+<body>
+<div id="hint">seconds.milliseconds; tap to reset</div>
+<div id="t">0.000</div>
+<div id="bar"></div>
+<script>
+let t0 = performance.now();
+const el = document.getElementById("t"), bar = document.getElementById("bar");
+document.body.onclick = () => { t0 = performance.now(); };
+function frame(now) {
+  const ms = Math.floor(now - t0);
+  el.textContent = (Math.floor(ms / 1000) % 100) + "." + String(ms % 1000).padStart(3, "0");
+  bar.style.width = ((ms % 1000) / 10) + "%";
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
