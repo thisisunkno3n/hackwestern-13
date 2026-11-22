@@ -91,6 +91,9 @@ typedef struct {
     seeker_colour c;  /* range from the wearer, with hysteresis (seeker_colour.h) */
     int box_valid;    /* eased screen box (WV_BOX_EASE), snapped on a jump */
     float bx, by, bw, bh;
+    int box_own;      /* that box was one the wearer's phone measured (its own detection box) */
+    int64_t own_ms;   /* when the wearer's phone last sent its own box of them (0: never), */
+    float own_box[4]; /* and that box, image px: drawn up to WV_SEEN_BOX_HOLD_MS after (item_box) */
     int shown;        /* drawn before: a change of look crossfades */
     int shown_direct; /* drawn as seen (with the WV_SEEN_HOLD_MS hold) */
     int64_t direct_ms, xfade_ms; /* last frame the wearer's phone saw them; start of the crossfade */
@@ -103,11 +106,35 @@ typedef struct {
 
 /* Handoff between x-ray and seen (wv_config.handoff). The wearer's phone misses a person now and
  * then (a frame under its confidence cut, a hand at a wall edge): a person seen stays seen for
- * WV_SEEN_HOLD_MS, so the look does not flip at the phone's frame rate. A change of look
+ * WV_SEEN_HOLD_MS, so the look does not flip at the phone's frame rate, in the last box that
+ * phone measured (not where the fused position projects), and the first box it measures after an
+ * x-ray look is drawn at once, not eased from the ghost's place. A change of look
  * (x-ray ghost to seen box or back) crossfades over WV_XFADE_MS in the plan theme, both drawn in
  * the same eased box. */
 #define WV_SEEN_HOLD_MS 400
+/* pitch_auto learns only from a box this tall against the projected standing person (the
+ * landmark box, eyes to ankles, is about 0.9 of it). */
+#define WV_TILT_BOX_MIN 0.78f
+#define WV_TILT_BOX_MAX 1.15f
 #define WV_XFADE_MS 250
+/* A seen person's box is the wearer phone's own detection box. In a frame without one (the hold
+ * above, or another phone leading the track) the last one stays for WV_SEEN_BOX_HOLD_MS instead
+ * of a projected standing-person box (0.5 m wide, floor to 1.75 m: tall and narrow on a crouched
+ * person). Past that, the projected box of a seen person whose posture is CROUCH keeps its width
+ * and gets WV_CROUCH_BOX_H of its height, up from the floor. */
+#define WV_SEEN_BOX_HOLD_MS 500
+#define WV_CROUCH_BOX_H 0.6f
+
+/* Duplicate check by ray (wv_classify same_on_ray, with handoff on): another phone's
+ * single-phone track is the seen person d when that phone's ray crosses the wearer's line to d
+ * (the lines at least WV_DUP_CROSS_DEG apart) at a point where both ranges read
+ * WV_DUP_RANGE_LO to WV_DUP_RANGE_HI times the distance and one of them within
+ * WV_DUP_RANGE_OK (a size range reads up to 2x long on a crouched or cut-off person, rarely
+ * short). */
+#define WV_DUP_RANGE_LO 0.8f
+#define WV_DUP_RANGE_OK 1.3f
+#define WV_DUP_RANGE_HI 2.2f
+#define WV_DUP_CROSS_DEG 10.0f
 
 /* Drawn boxes move this fraction of the way to the new box each frame (30 fps: about 50 ms of
  * lag), so detection-box noise and 15 Hz steps do not shake the overlay; a jump larger than
@@ -129,6 +156,8 @@ typedef struct {
     int n_fading;     /* crossfading between x-ray and seen */
     struct {
         int id, direct, x, y, w, h, level;
+        int skel_y0, skel_y1; /* canvas rows of the ghost skeleton's highest and lowest drawn
+                               * joint (both 0: no skeleton drawn for this person) */
     } drawn[SEEKER_MAX_TRACKS];
     float video_ms;   /* copying the picture into the canvas (and dimming it), this frame */
     float pitch_deg;  /* the camera tilt the x-ray projection used this frame (all terms) */

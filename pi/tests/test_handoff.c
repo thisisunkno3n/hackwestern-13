@@ -23,11 +23,21 @@
  *                   (0.4 s down, then stays down). The phones range as phone.html does, from
  *                   eye-to-ankle / 0.90: crouched that reads 1.75x long, so R2's range is 2.2x
  *                   the truth. Before is current main's defaults with --no-crouch-range.
+ *   walk-in, R2 part first  the reverse of step-out, in a room where R2 covers only the space
+ *                   behind the divider: the person walks from R1's view behind it (R1 loses
+ *                   them at the edge), and for its first 500 ms R2 sees only a head, a shoulder
+ *                   and an arm (box-height range about 2x long), then the whole person. Before
+ *                   is the defaults with hud_fusion --no-part-keep.
  *
  * Metrics: track ids the person had, ticks with two tracks (one person shown twice), frames
  * drawn as seen, look changes (seen <-> x-ray) after R1 first saw them, crossfade frames,
  * the largest step of the sent position in one 33 ms tick, and the sent position's error
- * against the truth from 400 ms after R1 first saw them, past the 350 ms glide (p50 / p95). */
+ * against the truth from 400 ms after R1 first saw them, past the 350 ms glide (p50 / p95).
+ * The seen frame against R1's own detection box (the one in R1's picture), in box heights: how
+ * far its centre is off on the first frame R1 sees an x-ray person, and how far the frame of a
+ * person held as seen (R1 missed them) is from R1's last box, in place or in height.
+ * Walk-in, for 1.5 s from R2's first sighting: the farthest the sent position is from the person,
+ * its largest step in one tick, and the tallest ghost drawn (joints' extent, person heights). */
 
 #include "anim.h"
 #include "draw.h"
@@ -85,9 +95,11 @@ static const pose3 R1 = { 0.0f, -2.0f, 0.0f }, R2_NEAR = { -1.59f, -1.4f, 49.0f 
                    R2_FAR = { -4.2f, -3.8f, 45.0f };
 static const float WALL[4] = { -0.2f, -0.6f, 1.4f, -0.6f };
 
-enum { STEP_OUT = 0, STEP_OUT_R2_LOST, STEP_OUT_FAR, HAND_OUT, PARTIAL_ALONE, CROUCH, N_SCENES };
+enum { STEP_OUT = 0, STEP_OUT_R2_LOST, STEP_OUT_FAR, HAND_OUT, PARTIAL_ALONE, CROUCH, WALK_IN, N_SCENES };
 static const char *const SCENE[] = { "step-out", "step-out, R2 lost", "step-out, far R2", "hand-out",
-                                     "partial alone", "crouch" };
+                                     "partial alone", "crouch", "walk-in, R2 part first" };
+#define WALK_IN_PART_MS 500 /* walk-in: R2 sees only part of the person this long */
+static int64_t g_r2_since;  /* walk-in: when the person came into R2's view (-1: not yet) */
 #define CROUCH_T0 1500 /* the crouch starts, and is down CROUCH_DOWN_MS later */
 #define CROUCH_DOWN_MS 400
 
@@ -134,6 +146,8 @@ static void truth(int scene, int64_t t, float *x, float *y)
     }
     float s = (float)(t - 1500) / 1500.0f;
     s = s < 0 ? 0 : s > 1 ? 1 : s;
+    if (scene == WALK_IN)
+        s = 1.0f - s; /* the same path, from R1's view to behind the divider */
     *x = 0.6f - 1.2f * s;
     *y = 0.2f - 0.4f * s;
 }
@@ -147,6 +161,13 @@ static int sees(int scene, const char *node, int64_t t, float x, float y)
     if (scene == HAND_OUT)
         return r1 ? (t >= 1000 && urand() < 0.7 ? 1 : 0) : 2;
     int r1_view = !behind_wall(R1, x, y);
+    if (scene == WALK_IN && !r1) { /* R2 covers only the space behind the divider */
+        if (r1_view)
+            return 0;
+        if (g_r2_since < 0)
+            g_r2_since = t;
+        return t - g_r2_since < WALK_IN_PART_MS ? 1 : 2;
+    }
     if (r1)
         return r1_view && urand() >= 0.12 ? 2 : 0;
     return scene == STEP_OUT_R2_LOST && r1_view ? 0 : 2;
@@ -218,7 +239,16 @@ typedef struct {
      * to the right of them as R1 sees it (m, R1 faces +y) */
     int c_ticks, c_two, c_crouch, c_frames, c_xray;
     double c_far, c_right;
+    /* the seen frame against R1's own box, in box heights: its centre on the first frame after an
+     * x-ray look, and a held frame's centre or height against R1's last box; held frames */
+    double first_off, held_off;
+    int held_frames;
+    /* walk-in, for WALK_IN_WINDOW_MS from R2's first sighting: farthest the sent position is from
+     * the person and its largest step in a tick (m), ticks with two tracks, tallest ghost drawn */
+    double w_err, w_step, w_tall;
+    int w_two;
 } metrics;
+#define WALK_IN_WINDOW_MS 1500
 #define CROUCH_SETTLED_MS (CROUCH_T0 + CROUCH_DOWN_MS + 400)
 
 static int cmp_d(const void *a, const void *b)
@@ -227,7 +257,13 @@ static int cmp_d(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
-static void run(int scene, int handoff, int crouch_range, const char *cfg_path, metrics *out)
+/* R1's image px to the 640x360 canvas (a 640x480 picture, pillarboxed). */
+static float canvas_x(float u)
+{
+    return 80.0f + 0.75f * u;
+}
+
+static void run(int scene, int handoff, int crouch_range, int part_keep, const char *cfg_path, metrics *out)
 {
     static seeker_config cfg;
     seeker_config_load(&cfg, cfg_path);
@@ -235,6 +271,8 @@ static void run(int scene, int handoff, int crouch_range, const char *cfg_path, 
     seeker_fusion_init(&f, &cfg);
     f.handoff = handoff;
     f.crouch_range = crouch_range;
+    f.part_keep = part_keep;
+    g_r2_since = -1;
     const pose3 R2 = scene == STEP_OUT_FAR ? R2_FAR : R2_NEAR;
     seeker_pose p1 = { R1.x, R1.y, R1.yaw }, p2 = { R2.x, R2.y, R2.yaw };
     seeker_fusion_set_pose(&f, "R1", &p1, "cli", 1);
@@ -262,13 +300,15 @@ static void run(int scene, int handoff, int crouch_range, const char *cfg_path, 
     static seeker_tracks tracks, latest;
     char buf[SEEKER_MAX_DATAGRAM], err[64];
     int ids[8], nids = 0, have = 0, last_look = -1;
-    int64_t r1_first = -1;
+    int64_t r1_first = -1, r2_first = -1;
     float last_x = 0, last_y = 0;
     int have_last = 0;
+    int prev_look = -1, have_own = 0; /* the look last drawn (0 x-ray, 1 seen); R1's last box */
+    float own_cx = 0, own_h = 0;      /* (canvas px): its centre x and its height */
     static double errs[MAXE];
     int nerr = 0;
     memset(out, 0, sizeof *out);
-    const int64_t end = scene <= STEP_OUT_FAR || scene == CROUCH ? 5000 : 4000;
+    const int64_t end = scene <= STEP_OUT_FAR || scene == CROUCH || scene == WALK_IN ? 5000 : 4000;
 
     for (int64_t now = 0; now < end; now++) {
         for (int n = 0; n < 2; n++)
@@ -276,6 +316,8 @@ static void run(int scene, int handoff, int crouch_range, const char *cfg_path, 
                 make_msg(scene, n ? "R2" : "R1", n ? R2 : R1, now, &q[nq]);
                 if (!n && q[nq].n && r1_first < 0)
                     r1_first = now;
+                if (n && q[nq].n && r2_first < 0)
+                    r2_first = now;
                 q_at[nq++] = now + 20 + (int64_t)(20 * urand());
                 next_gen[n] = now + 66 + (int64_t)(4 * gauss());
             }
@@ -311,8 +353,17 @@ static void run(int scene, int handoff, int crouch_range, const char *cfg_path, 
                         out->c_right = fmax(out->c_right, k->room_x_m - tx);
                     }
             }
+            int walk_in = scene == WALK_IN && r2_first >= 0 && now >= r2_first && now <= r2_first + WALK_IN_WINDOW_MS;
+            out->w_two += walk_in && latest.n > 1;
             if (latest.n == 1 && latest.tracks[0].has_room) {
                 const seeker_track *k = &latest.tracks[0];
+                if (walk_in) {
+                    float tx, ty;
+                    truth(scene, now, &tx, &ty);
+                    out->w_err = fmax(out->w_err, hypotf(k->room_x_m - tx, k->room_y_m - ty));
+                    if (have_last)
+                        out->w_step = fmax(out->w_step, hypotf(k->room_x_m - last_x, k->room_y_m - last_y));
+                }
                 if (have_last)
                     out->max_step = fmax(out->max_step, hypotf(k->room_x_m - last_x, k->room_y_m - last_y));
                 last_x = k->room_x_m, last_y = k->room_y_m, have_last = 1;
@@ -343,6 +394,33 @@ static void run(int scene, int handoff, int crouch_range, const char *cfg_path, 
                 out->look_flips++;
             last_look = look;
         }
+        /* The seen frame against the box R1 itself measured (the track's node_box when R1 is its
+         * primary node: what the display had this frame). */
+        if (v.last.n_drawn == 1 && latest.n == 1) {
+            const seeker_track *k = &latest.tracks[0];
+            float cx = (float)v.last.drawn[0].x + 0.5f * (float)v.last.drawn[0].w;
+            int own = !strcmp(k->node_id, "R1") && k->has_node_box && k->node_box[3] > 0;
+            if (own) {
+                own_cx = canvas_x(k->node_box[0] + 0.5f * k->node_box[2]);
+                own_h = 0.75f * k->node_box[3];
+                have_own = 1;
+                if (v.last.drawn[0].direct && prev_look == 0)
+                    out->first_off = fmax(out->first_off, fabsf(cx - own_cx) / own_h);
+            } else if (v.last.drawn[0].direct && v.last.n_held > 0 && have_own) {
+                out->held_frames++;
+                out->held_off = fmax(out->held_off, fmaxf(fabsf(cx - own_cx), fabsf((float)v.last.drawn[0].h - own_h)) / own_h);
+            }
+            if (scene == WALK_IN && !v.last.drawn[0].direct && k->has_pts && r2_first >= 0 &&
+                now <= r2_first + WALK_IN_WINDOW_MS) {
+                float lo = 1e9f, hi = -1e9f;
+                for (int j = 0; j < SEEKER_N_JOINTS; j++)
+                    if (k->pts[j][2] >= 0.3f)
+                        lo = fminf(lo, k->pts[j][1]), hi = fmaxf(hi, k->pts[j][1]);
+                if (hi > lo)
+                    out->w_tall = fmax(out->w_tall, hi - lo);
+            }
+        }
+        prev_look = v.last.n_drawn == 1 ? v.last.drawn[0].direct : -1;
     }
     out->ids = nids;
     if (nerr > 0) {
@@ -355,9 +433,10 @@ static void run(int scene, int handoff, int crouch_range, const char *cfg_path, 
 static void print(const char *tag, const metrics *m)
 {
     printf("  %-6s ids %d, two-track ticks %3d, seen frames %3d, look changes %2d, crossfade frames %2d, "
-           "max step %.2f m, error p50 %.2f p95 %.2f m\n",
+           "max step %.2f m, error p50 %.2f p95 %.2f m; seen frame off R1's box: first %.2f, held %.2f "
+           "box heights (%d held)\n",
            tag, m->ids, m->two_ticks, m->seen_frames, m->look_flips, m->fade_frames, m->max_step,
-           m->err_p50, m->err_p95);
+           m->err_p50, m->err_p95, m->first_off, m->held_off, m->held_frames);
 }
 
 int main(int argc, char **argv)
@@ -385,13 +464,15 @@ int main(int argc, char **argv)
         for (int s = 0; s < N_SCENES; s++)
             for (int h = 0; h < 2; h++) {
                 g_seed = seed + (unsigned)s;
-                /* the crouch scene's before is the handoff on, the crouch height model off */
-                run(s, s == CROUCH ? 1 : h, h, cfg_path, &m[s][h]);
+                /* the crouch scene's before is the handoff on, the crouch height model off; the
+                 * walk-in scene's is the handoff on, part_keep off */
+                run(s, s == CROUCH || s == WALK_IN ? 1 : h, s == WALK_IN ? 1 : h, s == WALK_IN ? h : 1, cfg_path,
+                    &m[s][h]);
             }
         flips[an] = m[STEP_OUT][1].look_flips;
         fades[an] = m[STEP_OUT][1].fade_frames;
         printf("handoff replay, animations %s, same seed per scene (before = --no-handoff / --handoff off;\n"
-               "crouch: before = --no-crouch-range):\n",
+               "crouch: before = --no-crouch-range; walk-in: before = --no-part-keep):\n",
                an ? "on" : "off");
         for (int s = 0; s < N_SCENES; s++) {
             printf("%s\n", SCENE[s]);
@@ -404,6 +485,12 @@ int main(int argc, char **argv)
                    "farthest track %.2f m from the person, %.2f m right of them\n",
                    h ? "after" : "before", cm->c_ticks, cm->c_two, cm->c_crouch, cm->c_frames, cm->c_xray,
                    cm->c_far, cm->c_right);
+        }
+        for (int h = 0; h < 2; h++) {
+            const metrics *wm = &m[WALK_IN][h];
+            printf("  %-6s walk-in, %d ms from R2's first sighting: farthest %.2f m from the person, largest step "
+                   "%.2f m, tallest ghost %.2f person heights, two-track ticks %d\n",
+                   h ? "after" : "before", WALK_IN_WINDOW_MS, wm->w_err, wm->w_step, wm->w_tall, wm->w_two);
         }
         const metrics *so = &m[STEP_OUT][1], *sl = &m[STEP_OUT_R2_LOST][1], *sf = &m[STEP_OUT_FAR][1];
         const metrics *ho = &m[HAND_OUT][1];
@@ -436,6 +523,25 @@ int main(int argc, char **argv)
         WANT(cr->c_ticks > 0 && cr->c_crouch >= cr->c_ticks - 3, "crouch: posture CROUCH once down");
         WANT(cr->c_far < 0.35 && cr->c_right < 0.25 && cr->err_p95 < 0.25,
              "crouch: the track stays on the person (no copy off to the right)");
+        /* The seen frame is R1's own box: at once when R1 first sees an x-ray person (not eased
+         * there from the ghost's place), and still while R1 misses a frame (not the fused
+         * position projected back into R1's picture). The eased box lags a walker a little. */
+        WANT(so->first_off < 0.06 && sl->first_off < 0.06 && sf->first_off < 0.06,
+             "step-out: the first seen frame is on R1's own box, not eased from the ghost");
+        /* which frames R1 misses is drawn from the seed: some seeds give a scene no held frame */
+        WANT(so->held_frames + sf->held_frames > 0 && so->held_off < 0.12 && sf->held_off < 0.12,
+             "step-out: a person held as seen stays in R1's last box");
+        const metrics *wi = &m[WALK_IN][1], *wb = &m[WALK_IN][0];
+        WANT(wi->ids == 1 && wi->w_two == 0, "walk-in: one track id, never two people");
+        WANT(wi->w_err < 1.0 && wb->w_err > 1.5,
+             "walk-in: R2's part sighting does not throw the person along R2's ray");
+        /* Kept by bearing while R2 sees a part, the person may have walked on along R2's ray: the
+         * correction when R2 sees them whole glides (31% of it in the first tick, as step-out). */
+        WANT(wi->w_step < 0.6 && wi->w_step < wb->w_step, "walk-in: no jump when R2 picks them up or sees them whole");
+        /* R2's range reads 25% long, so its ghost is that much taller than the 0.93 of the body. */
+        WANT(wi->w_tall > 0 && wi->w_tall < 1.4 && wb->w_tall > 1.6, "walk-in: the ghost is person sized");
+        WANT(wi->held_frames > 0 && wi->held_off < 0.12,
+             "walk-in: the seen frame stays where R1 last saw them until the ghost takes over");
     }
     WANT(flips[0] == flips[1] && fades[0] == fades[1], "step-out: same look change and crossfade, animations on or off");
     printf("%s\n", fails ? "handoff targets missed" : "all handoff targets met");

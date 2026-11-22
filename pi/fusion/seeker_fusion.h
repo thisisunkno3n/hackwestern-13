@@ -106,23 +106,35 @@ typedef struct {
     long crouch_ranges;    /* contacts ranged with the crouch height (logs, tests) */
     /* Occlusion guard (SEEKER_OCCL_*): */
     unsigned char part[SEEKER_MAX_CONTACTS]; /* last message's contacts: 1 shows part of a body,
-                                              * 2 whole but held partial, 4 near frag_bearing */
+                                              * 2 whole but held partial, 4 near frag_bearing,
+                                              * SEEKER_PART_CUT a part only because of the frame */
     int64_t frag_ms;       /* when this node last saw part of someone, at frag_bearing */
     float frag_bearing;
     int frag_whole;        /* whole sightings near frag_bearing since then */
     long frag_held;        /* whole sightings taken as partial (logs, tests) */
+    long cut_n;            /* partial contacts kept as seen, cut by the frame (logs, tests) */
+    int64_t part_log_ms;   /* last "part:" log line */
 } seeker_fusion_node;
 
 /* Crouch height model. phone.html ranges from the eye (or nose) to mid-ankle height over
  * SEEKER_STAND_EYE_ANKLE_FRAC of the standing height when both show. Crouched (both legs folded,
- * seeker_posture_classify on the contact's own landmarks) that height is
- * SEEKER_CROUCH_EYE_ANKLE_FRAC of the standing height (about 0.48 in a full squat to 0.68 with a
- * knee down), so the range reads 1.3 to 1.9x long: far enough past the other phone's fix that
- * triangulation splits the person in two. Such a range is scaled by the ratio of the two. A
- * contact ranged from the torso (no eyes or ankles at visibility 0.5) needs nothing: the torso
- * does not fold. */
+ * seeker_posture_classify on the contact's own landmarks) that height is 0.85 of the standing one
+ * as the legs start to fold, 0.48 in a full squat, so the range reads 1.2 to 1.9x long: far
+ * enough past the other phone's fix that triangulation splits the person in two. Such a range is
+ * scaled by the height the phone measured over the standing one, and the standing one comes from
+ * the person's own body in the same picture: the longest of thigh or shin over
+ * SEEKER_BODY_LEG_SEG_FRAC, the torso over SEEKER_BODY_TORSO_FRAC and the shoulder line over
+ * SEEKER_BODY_SHOULDER_FRAC (limbs are true side on, the shoulders facing the phone). So the
+ * factor follows the crouch down and back up instead of stepping, never under
+ * SEEKER_CROUCH_EYE_ANKLE_MIN / 0.90 and never over 1; SEEKER_CROUCH_EYE_ANKLE_FRAC is used when
+ * no body length shows. A contact ranged from the torso (no eyes or ankles at visibility 0.5)
+ * needs nothing: the torso does not fold. */
 #define SEEKER_STAND_EYE_ANKLE_FRAC 0.90f /* phone.html EYE_ANKLE_FRAC */
 #define SEEKER_CROUCH_EYE_ANKLE_FRAC 0.58f
+#define SEEKER_CROUCH_EYE_ANKLE_MIN 0.42f
+#define SEEKER_BODY_LEG_SEG_FRAC 0.25f   /* hip to knee, knee to ankle: of the standing height */
+#define SEEKER_BODY_TORSO_FRAC 0.30f     /* mid-shoulder to mid-hip (phone.html TORSO_FRAC) */
+#define SEEKER_BODY_SHOULDER_FRAC 0.24f  /* shoulder to shoulder */
 
 #define SEEKER_MAX_TAGS 16
 
@@ -207,6 +219,12 @@ typedef struct {
     float ho_x, ho_y;   /* handoff blend: offset from the new fix, decaying from ho_ms */
     int64_t ho_ms;
     long handoffs;      /* node set changes this track lived through (logs, tests) */
+    int ranged_whole;   /* placed at least once from more than a lone partial sighting, */
+    int64_t whole_ms;   /* last at whole_ms: part_keep trusts that distance SEEKER_PART_KEEP_MS */
+    const void *post_node; /* posture: the node and message count the last vote's joints came */
+    long post_msgs;        /* from, so one phone message votes once however often it is rescaled */
+    float post_pts[SEEKER_N_JOINTS][3];
+    int part_fix;       /* the last fix was another phone's lone partial sighting, by bearing */
 } seeker_fusion_mem;
 
 /* Handoff between phones (an R2-only x-ray person R1 starts to see, or the other way round).
@@ -246,11 +264,29 @@ typedef struct {
  *     joints under SEEKER_OCCL_FRAG_VIS are not taken, nor are joints placed on or past the
  *     frame's edge from any view: they are held, then hidden (seeker_skel.h).
  *   - The wearer's lone partial sighting continues a track on its bearing at the distance of the
- *     track's last fix, not one moved on by its velocity: no walking on into the wall. */
+ *     track's last fix, not one moved on by its velocity: no walking on into the wall.
+ *   - Another phone's lone partial sighting (R2 sees a head and an arm of someone who just walked
+ *     behind the wall) does the same for a track that was already ranged from a whole body
+ *     (part_keep; hud_fusion --no-part-keep): its box-height range is the visible part's, about
+ *     twice too far, which threw the ghost 2 m along that phone's ray and drew its few joints
+ *     twice the size until the phone saw the whole person. A track that was never ranged whole
+ *     keeps the part's range, as before (there is nothing better). */
 #define SEEKER_OCCL_HOLD_MS 1000
+#define SEEKER_PART_KEEP_MS 4000 /* part_keep: how long a whole-body distance stands in for a part's */
+/* Someone standing close to a phone has their legs below its frame, and the pose model's hip
+ * visibility dips under 0.5 now and then: a partial contact by the rule above, though
+ * nothing hides them. Such a contact (head and both shoulders seen, both ankles placed at
+ * SEEKER_PART_CUT_ROW of the frame height or lower) is still ranged by bearing only, but its phone
+ * stays one of the track's nodes (so the wearer's own box is drawn, SEEN) and it does not start
+ * the hold above: with it, every dip made the next two whole sightings partial too, and a person
+ * in plain view of the wearer was drawn as an x-ray ghost in a floor-to-head hull for good. */
+#define SEEKER_PART_CUT 8
+#define SEEKER_PART_CUT_ROW 0.98f
 #define SEEKER_OCCL_BEARING_DEG 8.0f
 #define SEEKER_OCCL_WHOLE_N 3
 #define SEEKER_OCCL_FRAG_VIS 0.5f
+#define SEEKER_OCCL_PART_COST 4.0 /* assignment cost (sigmas squared) added to another phone's
+                                   * lone partial sighting continuing a track by bearing */
 
 #define SEEKER_FUSION_MEM 32
 
@@ -277,6 +313,9 @@ typedef struct {
                        * (hud_fusion --no-crouch-range) */
     int occl_guard;  /* 1 (init default), with handoff: a person cut by a wall or the frame edge
                       * (SEEKER_OCCL_*); 0 is the old code (hud_fusion --no-occl-guard) */
+    int part_keep;   /* 1 (init default), with occl_guard: another phone's lone partial sighting
+                      * keeps the distance of a track already ranged whole (hud_fusion
+                      * --no-part-keep: its own part-size range, the old code) */
     int n_tags;    /* room poses of tags other than 0 (hud_fusion --tag-pose) */
     seeker_fusion_tag tags[SEEKER_MAX_TAGS];
     seeker_tri_opts tri; /* triangulation tuning; init copies assoc_m and the fusion.tri_* keys */

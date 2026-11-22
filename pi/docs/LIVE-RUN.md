@@ -577,6 +577,14 @@ distance label, colour and plan mark carry on.
   the phone's frame rate. Fusion keeps what the two-phone fix taught about each phone's range, so
   the ghost does not jump back by R2's error when R1 loses them (it fades back to the phone's own
   range over a few seconds).
+- **The seen frame is R1's own box.** R1's detection box is measured in the picture the HUD
+  shows, so it is where the person is. Before, the first seen frames after an x-ray look were
+  eased over from where the ghost stood (the fused position, off by R2's range error: up to a
+  quarter of a box height beside the person, more with a far R2), and a person held as seen
+  through a frame R1 missed was drawn where the fused position projects (a third of a box
+  height off in place or size, pumping at every missed frame). Now the first box R1 measures
+  after an x-ray look is drawn at once, and a held person stays in R1's last box until R1 sees
+  them again or the 400 ms run out. `HUD_ARGS="--handoff off"` is the old behaviour.
 
 Host replay (`build/test_handoff`, ctest `handoff`; before = old code on the same seed):
 
@@ -586,6 +594,8 @@ Host replay (`build/test_handoff`, ctest `handoff`; before = old code on the sam
 | Step out, R2 loses them | 0.50 m error (R2's range reused on R1's ray) | 0.06 m |
 | Step out, far R2 (30% long) | 2 ids, 1.98 m jump, 7 look changes | 1 id, glide (0.62 m first tick), 1 look change |
 | Hand out | 2 people for 37 ticks, drawn SEEN 54 frames, ghost 0.40 m off | 1 x-ray person, 0.23 m off |
+| First seen frame against R1's box (main before this fix) | 0.12 box heights off, 0.26 with the far R2 | 0.00 |
+| Held seen frame against R1's last box (main before this fix) | 0.36 box heights off | 0.01 |
 | R1 sees only a hand, nobody else | a person 2.3 m off | nothing |
 
 Logs: `hud_fusion.log` starts with `handoff: partial contacts by bearing ...`; with `--debug`,
@@ -636,6 +646,84 @@ grep -c 'occl: whole sighting' ~/seeker-logs/hud_fusion.log
 ```
 
 `FUSION_ARGS=--no-occl-guard sh scripts/run-live.sh` is the old behaviour, to compare.
+
+## Sizes: someone close to R1 keeps R1's own box
+
+What is right: a SEEN box is R1's own detection box; an x-ray hull is a standing person from the
+floor to the top of the head at their distance from R1 (`f * 1.75 / distance`,
+`f = (width / 2) / tan(hfov / 2)`), and the ghost skeleton is scaled by that height. Host check:
+`build/test_size` (ctest `size`): 2, 3 and 5 m, in view and behind the wall, config defaults and
+`run-live.sh` defaults, landscape and portrait, each within 10 percent.
+
+What went wrong (boxes and ghosts far too big for someone standing in front of R1): within about
+2.7 m of R1 the frame cuts a standing person's legs, and the pose model's hip visibility dips
+under 0.5 in some frames. Fusion reads such a frame as "part of a body", and the
+occlusion guard then held the next two whole sightings partial too, so R1 never counted as seeing
+them: they were drawn as an x-ray person, a floor-to-head hull and R2's ghost over someone in plain
+view (host replay: SEEN in 0 of 31 frames, hull 1.47 times R1's box). With the guard off the look
+stayed SEEN but the box was the projected one in 25 of 31 frames. Now:
+
+- Fusion (`SEEKER_PART_CUT`): a partial contact with the head and both shoulders seen and both
+  ankles placed at the bottom edge of the frame or below is cut by the frame, not hidden. It is
+  still ranged by bearing only, but R1 stays one of the track's phones (SEEN, R1's box) and it
+  does not start the occlusion hold.
+- HUD: through the 400 ms SEEN hold the last box R1 itself sent stays, instead of the projected
+  floor-to-head box (which is far bigger than the box of someone close or crouched).
+- `PITCH_AUTO` learns only from a whole standing person (box 0.78 to 1.15 of the projected height,
+  posture not crouch or down): a cut or crouched person taught it up to 6 deg of tilt, which drew
+  the people behind the wall up to 13 percent too tall and off their spot.
+
+Log to check live, at most one line per phone every 5 s while it sends a part of someone:
+
+```sh
+grep 'part:' ~/seeker-logs/hud_fusion.log | tail -20
+```
+
+`NODE R1 part: R1-p1 at 2.1 deg is cut by the frame: still seen by this phone ...` is the new
+case. `... shows part of a body: ranged by bearing, not one of the track's phones while another
+sees them whole (head, shoulders, hips, ankles visibility, ankle rows)` for a person standing in
+the open means the rule missed them: the numbers say why (ankle rows under 0.98: the pose model
+placed the hidden feet inside the frame; a shoulder under 0.5). `FUSION_ARGS=--no-occl-guard`
+turns the hold off, to compare.
+
+### The ghost that flew off as a '<' when someone walked behind the wall
+
+With R2 covering only the space behind the wall, R2's first sightings of someone walking in are
+of a part of them (a head, a shoulder and an arm past the wall's end or the frame's edge). The
+phone ranges such a contact from the box of the visible landmarks, which reads about twice too
+far. For R1 that was already handled (a partial contact counts by bearing only); a lone partial
+contact from R2 was taken at its range. The track R1 had just lost was matched to it (the gate
+is long along a one-phone ray), so the person glided about 2 m on along R2's ray in a third of
+a second, the held seen frame went with them, and the ghost that faded in was those few joints
+(an angle of head, shoulder and arm: the '<') scaled by the wrong distance to twice the size.
+When R2 saw the whole person it all came back over about a second. Now (`part_keep`, on with
+the occlusion guard):
+
+- Another phone's lone partial sighting of a person who was already ranged from a whole body
+  keeps their distance: they are placed on that phone's bearing at the track's distance, as
+  R1's partial sightings are. The skeleton is scaled by that distance.
+- When that phone then sees the whole person, the difference (they may have walked on along its
+  ray meanwhile) glides in over 350 ms like a change of phone.
+- A person only ever seen in part by R2 is still placed at the part's range (nothing better is
+  known).
+- The kept distance is trusted for 4 s (`SEEKER_PART_KEEP_MS`) after the last whole-body range;
+  past that the part's own range is used again.
+- The held seen frame stays in R1's last box (above), so nothing cyan moves behind the wall.
+
+Host replay (ctest `handoff`, scene "walk-in, R2 part first"; before = `--no-part-keep`):
+
+| | Before | After |
+| --- | --- | --- |
+| Farthest from the person in the 1.5 s after R2 picks them up | 2.29 m | 0.69 m |
+| Largest step in one 33 ms tick | 0.75 m | 0.37 m |
+| Tallest ghost drawn (a body is 0.93) | 1.81 person heights | 1.14 |
+| Held seen frame against R1's last box | 0.80 box heights off (main) | 0.01 |
+
+What is left: while R2 sees only a part, the distance along R2's ray is not measured, so a
+person walking away from R2 lags (up to 0.85 m in the replay, where the walk is nearly along
+R2's ray) until R2 sees them whole. `hud_fusion.log` starts with `part keep: ...`;
+`FUSION_ARGS=--no-part-keep sh scripts/run-live.sh` is the old behaviour, to compare, and
+`FUSION_ARGS=--debug` logs `track N handoff to R2: X m from where it was` when R2 takes over.
 
 ## Morrissette calibration (tag 0 only, both phones fixed)
 
@@ -729,15 +817,28 @@ phone's frame, with a real shin (MediaPipe invents hidden legs and often folds t
   of the camera's view (a person lying 3 m away usually is).
 - STAND: one straight, vertical leg (knee over 150 deg) and the torso upright. One is enough: on a
   staircase the other foot is a step or two up with its knee bent.
-- CROUCH: BOTH legs folded (knee under 120 deg, or the knee less than 0.45 torso lengths below
-  the hip): squatting, kneeling, sitting. One folded leg with the other hidden is no evidence (the
-  upper leg on a stair looks the same): the label stays as it was.
+- CROUCH: BOTH legs folded: squatting, kneeling, sitting. A leg is folded when its knee is under
+  120 deg, or the knee is less than 0.45 torso lengths below the hip, or the leg is short: hip to
+  ankle under 0.41 of the body height in the picture, with the knee under 0.75 torso lengths below
+  the hip. The body height comes from whatever the view shortens least (thigh or shin side on, the
+  torso, the shoulder line facing the phone). The short-leg test is what catches a crouch facing
+  the phone from chest height: there the knees point at the camera, the 2D knee angle stays near
+  160 deg and the forward lean shortens the torso, so the first two tests only fired with the hips
+  almost on the floor (0.36 m up; now 0.6 m). One folded leg with the other hidden is no evidence
+  (the upper leg on a stair looks the same): the label stays as it was. Side on with only the far
+  ankle hidden behind the near leg, the far thigh still counts (knee under 0.7 of a leg segment
+  below the hip).
 - UNKNOWN: no torso, or no full leg (ankles hidden by a wall, desk or stair, or below the frame).
   No guess.
-- Stable: a new label needs 7 of the last 10 skeletons (about 0.5 s at 15 Hz), UNKNOWN 12 of the
-  last 15 (about 1 s), and each label stays at least 0.5 s. Host tests: stand to crouch in about
-  0.5 s, 0 changes in 10 s of a noisy standing person, 12 s of stair climbing (every other step
-  with the lower leg hidden) stays STAND with 0 crouch labels, a 0.2 s crouch glitch never flips.
+- Stable: a new label needs 6 of the last 9 skeletons (about 0.4 s at 15 Hz), UNKNOWN 12 of the
+  last 15 (about 1 s), and each label stays at least 0.5 s. The votes read each message's own
+  joints, not the smoothed ghost (its One Euro filter trails a crouch by 0.3 to 0.5 s). Host tests:
+  stand to crouch in about 0.4 s, 0 changes in 10 s of a noisy standing person, 12 s of stair
+  climbing (every other step with the lower leg hidden) stays STAND with 0 crouch labels, a 0.2 s
+  crouch glitch never flips. `test_crouch` (ctest `crouch`) replays a jointed 3D person through
+  both phones' cameras: an ordinary crouch (hips 0.59 m up) facing R1 never read CROUCH before
+  and reads it 0.2 to 0.5 s after the person is down now; walking, stair steps and bending over
+  stay STAND.
 - Logs: `hud_fusion.log` prints the settings at start (`posture: legs need ...`) and each change,
   e.g. `track 3 R2 posture stand -> crouch (2 deg torso, legs: L knee 90 deg thigh drop 0.09 len
   0.35 R knee 85 deg thigh drop 0.12 len 0.44)`; `L hidden` is a leg that did not count.
@@ -750,31 +851,44 @@ phone's frame, with a real shin (MediaPipe invents hidden legs and often folds t
   | `SEEKER_POSTURE_LEG_VIS` | `0.5` | hidden legs still count (raise to `0.6`), or real legs drop out and everyone reads UNKNOWN (lower to `0.4`) |
   | `SEEKER_POSTURE_CROUCH_KNEE` | `120` | real crouches are missed (raise to `130`) |
   | `SEEKER_POSTURE_CROUCH_THIGH` | `0.45` | sitting facing the phone is missed (raise to `0.55`) |
+  | `SEEKER_POSTURE_CROUCH_LEG` | `0.41` | a crouch facing the phone is still read late (raise to `0.43`), or standing people read CROUCH (lower to `0.38`; `0` turns the short-leg test off) |
   | `SEEKER_POSTURE_STAND_KNEE` | `150` | standing people stay UNKNOWN (lower to `140`) |
   | `SEEKER_POSTURE_STAND_THIGH` | `0.6` | the same, with the thigh short in the picture (phone far above or below) |
   | `SEEKER_POSTURE_ONE_LEG` | `0` | `1`: a single deeply folded leg (knee under 100 deg, thigh level) is enough for CROUCH, for side views where the far leg is hidden. Risk: a big stair step |
-  | `SEEKER_POSTURE_VOTES` | `7/10` | `5/10` for a faster label, `9/12` for a steadier one |
+  | `SEEKER_POSTURE_VOTES` | `6/9` | `5/8` for a faster label, `9/12` for a steadier one |
 
   ```sh
   SEEKER_POSTURE_LEG_VIS=0.6 SEEKER_POSTURE_VOTES=8/12 sh scripts/run-live.sh
   ```
 - Phone side: `phone.html` drops detections whose box is less than 1.5 times taller than wide
-  (`isUpright`), and a deep squat or a side-on sitter is often wider than that, so the person
-  blinks out instead of reading CROUCH. Add `&minaspect=1.0` to that phone's link (typed by hand)
-  if crouching people vanish.
+  (`isUpright`, `?minaspect`). A crouched person is about as wide as tall, so the wearer's phone
+  dropped them: the HUD lost R1's own box and drew a held or projected one, or R2's x-ray ghost.
+  A pose that shows a body (shoulders, hips and one whole leg over visibility 0.5) is now kept
+  down to 0.7 (`?crouchaspect`, `1.5` is the old gate). Reload the page on both phones.
 - Range when crouched. `phone.html` ranges from eye-to-ankle height over 0.90 of the standing
-  height. Crouched, that height is about 0.48 (full squat) to 0.68 (one knee down) of standing,
-  so the range reads 1.3 to 1.9 times too far. With R2's own error on top it lands past the
+  height. Crouched, that height is 0.85 (legs starting to fold) to 0.48 (full squat) of standing,
+  so the range reads 1.2 to 1.9 times too far. With R2's own error on top it lands past the
   two-phone fix's limit (2x), and the person split in two: SEEN on R1's bearing plus an x-ray
-  copy far along R2's ray (to the right of the person from R1 at Morrissette). `hud_fusion` now
-  checks each contact's own landmarks: both legs folded (the CROUCH rule above) and an
-  eye-to-ankle range means the range is taken with the crouch height (x0.64, 0.58 over 0.90).
-  A contact ranged from the torso (no eyes or ankles in view) is left as sent. Log, at most every
-  5 s per phone: `NODE R1 crouch range R1-p3: eye-to-ankle range 4.12 m taken as crouched, 2.65 m
-  (x0.64; ...; N so far)`. `FUSION_ARGS=--no-crouch-range` is the old behaviour. Host replay
-  (`test_handoff`, crouch scene, 2.5 s crouched): before, a second track 67 of 82 ticks, an x-ray
-  copy drawn 74 of 82 frames, 2.6 m from the person and 1.3 m to their right; after, one track, 0
-  x-ray frames, CROUCH every tick, at most 0.20 m off.
+  copy far along R2's ray (to the right of the person from R1 at Morrissette). `hud_fusion`
+  checks each contact's own landmarks as it arrives (no votes, no delay): both legs folded (the
+  CROUCH rule above) and an eye-to-ankle range means the range is scaled by the height the phone
+  measured over the standing height, and the standing height is read off the person's own body
+  in the same picture (thigh or shin over 0.25, torso over 0.30, shoulder line over 0.24, the
+  longest wins). So the factor follows the crouch down and up (x0.85 to x0.47) instead of one
+  fixed x0.64 step. A contact ranged from the torso (no eyes or ankles in view) is left as sent.
+  Log, at most every 5 s per phone: `NODE R1 crouch range R1-p3: eye-to-ankle range 4.12 m taken
+  as crouched, 2.65 m (x0.64; ...; N so far)`. `FUSION_ARGS=--no-crouch-range` turns it off.
+- One person, one mark. If the two phones' fixes still disagree (a range the correction did not
+  catch: ankles hidden so the phone ranged from the box, the way down), the HUD's duplicate check
+  no longer needs R2's track to sit near the seen person: R2's ray through its track only has to
+  cross R1's line to the seen person at a point where both ranges read 0.8 to 2.2 times the
+  distance and one of them within 1.3 (`WV_DUP_*`, off with `--handoff off`). Not when R2 also
+  sees the seen person, not for a track two phones fixed, not across a wall.
+- SEEN box when crouched. The cyan box is R1's own detection box. In a frame R1 missed the person
+  (still drawn as seen for 0.4 s) the HUD used to fall back to a projected standing-person box,
+  0.5 m wide and floor to 1.75 m: tall and narrow on someone crouched. It now keeps R1's last
+  box for up to 0.5 s, and a seen person labelled CROUCH with no box from R1 gets the projected
+  box at the same width and 0.6 of the height.
 - Limits: 2D only. Someone lying along the camera's line of sight (head toward the phone) looks
   short and upright and may read STAND or UNKNOWN.
 
@@ -958,7 +1072,7 @@ or come closer. `--no-pose-flip` in `FUSION_ARGS` turns the catch off (the jump 
 | `R1_CAM_H` | `1.30` | R1's camera height above the floor, m (handheld at chest height) | the x-ray people sit too low (lower it) or too high |
 | `R1_PITCH` | `0` | R1's tilt, deg, up positive (the phone's `pitch_deg` wins when it sends one) | it is held tilted |
 | `XRAY_UP` | `0` | nudge, deg: positive draws the x-ray people higher | a last fix on stage |
-| `PITCH_AUTO` | `1` | learns R1's tilt from people R1 sees whole (its own box vs the projection) | turn off if a half-hidden person keeps dragging it |
+| `PITCH_AUTO` | `1` | learns R1's tilt from people R1 sees whole and standing (its own box vs the projection) | turn off if a half-hidden person keeps dragging it |
 | `R2_CAM_H`, `R2_PITCH` | `1.27`, `0` | R2's camera height and tilt: `hud_fusion.log` logs `range check: box height X m, ground plane Y m` | the two disagree: trust the ground plane when R2 is level |
 | `GROUND_RANGE` | `0` | `1` averages R2's ground-plane range into its ranges | the range check shows the box height is off and R2 is level |
 | `R2_POSE` | measure | R2's x,y,yaw (see "Where R2 is"). `sh scripts/calibrate.sh yaw R2` fills in the yaw from tag 0, keeping the measured x,y | R2's people are rotated around R2 |
