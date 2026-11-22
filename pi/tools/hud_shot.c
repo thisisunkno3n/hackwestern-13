@@ -14,6 +14,10 @@
  * for classic too, for the pixel check against main). Built with -DHUD_SHOT_CLASSIC_ONLY it
  * renders classic only (it then compiles against older trees without the plan theme).
  *
+ * --demo DIR renders all three plan animation modules in one 7.5 s story from the frames and
+ * timeline tools/hud_demo_frames.py writes to DIR (DIR/out/f000.png ..., plus the cost per frame
+ * with the animations on and off).
+ *
  * --alert-seq DIR renders the plan theme's alert animations (display/anim_alert.h) instead: six
  * sequences, one PNG every 33 ms in DIR/<name>/f000.png..., driven only by hud_state.now_ms, so
  * every frame is a chosen moment: close (someone walks in fast, then back out), down (the seen
@@ -555,9 +559,153 @@ static int ps_run(const char *which, int t0, int t1, int dt, int perf, const cha
 }
 #endif
 
+#ifndef HUD_SHOT_CLASSIC_ONLY
+/* ---- --demo DIR: the three plan animation modules in one sequence ----
+ * DIR holds scene.txt and f000.ppm ... from tools/hud_demo_frames.py (the camera frames and the
+ * timeline). Every frame is one hud_render at hud_state.now_ms = start + t, so all three modules
+ * run on the same clock exactly as on the Pi. Writes DIR/out/f000.png ..., then renders the whole
+ * sequence again with the animations off and prints the per-frame cost of both. */
+static int run_demo(const char *dir, canvas *cv, seeker_config *cfg, seeker_health_table *health,
+                    video_frame *f)
+{
+    char path[600];
+    snprintf(path, sizeof path, "%s/scene.txt", dir);
+    FILE *sc = fopen(path, "r");
+    if (!sc) {
+        fprintf(stderr, "cannot read %s (run tools/hud_demo_frames.py %s first)\n", path, dir);
+        return 1;
+    }
+    enum { MAXF = 600 };
+    static int tm[MAXF], seen[MAXF], hid[MAXF], down[MAXF];
+    static float sx[MAXF], sy[MAXF];
+    int nf = 0;
+    while (nf < MAXF &&
+           fscanf(sc, "%d %d %f %f %d %d", &tm[nf], &seen[nf], &sx[nf], &sy[nf], &hid[nf], &down[nf]) == 6)
+        nf++;
+    fclose(sc);
+    char outdir[600];
+    snprintf(outdir, sizeof outdir, "%s/out", dir);
+    mkdir(outdir, 0755);
+    draw_set_theme(DRAW_THEME_PLAN);
+    draw_ui_init(cv->h);
+    uint32_t *vid = malloc((size_t)cv->w * (size_t)cv->h * 4);
+    if (!vid)
+        return 1;
+    /* Pass 0 writes the frames (animations on). Then three timed runs each with the animations on
+     * and off; each frame keeps its fastest time, so scheduler noise does not count as cost. */
+    static double best[2][MAXF];
+    for (int i = 0; i < nf; i++)
+        best[0][i] = best[1][i] = 1e9;
+    for (int pass = 0; pass < 7; pass++) {
+        int on = pass == 0 || (pass - 1) % 2 == 0, slot = on ? 0 : 1;
+        anim_set_enabled(on);
+        anim_alert_reset();
+        anim_person_reset();
+        anim_map_reset();
+        static wv_view v;
+        memset(&v, 0, sizeof v);
+        wv_config_defaults(&v.cfg);
+        snprintf(v.cfg.node, sizeof v.cfg.node, "R1");
+        v.cfg.pose.y_m = -2;
+        v.cfg.pose_src = WV_POSE_STATIC;
+        v.cfg.n_walls = 1;
+        v.cfg.walls[0][0] = 0.3f;
+        v.cfg.walls[0][2] = 2.5f;
+        v.cfg.radar_fallback = 1;
+        v.cfg.from_config = 1;
+        for (int i = 0; i < nf; i++) {
+            int bw = 0, bh = 0;
+            snprintf(path, sizeof path, "%s/f%03d.ppm", dir, i);
+            uint32_t *src = load_ppm(path, &bw, &bh);
+            if (!src) {
+                fprintf(stderr, "cannot read %s\n", path);
+                free(vid);
+                return 1;
+            }
+            uint32_t *sc2 = scale_to(src, bw, bh, cv->w, cv->h);
+            memcpy(vid, sc2, (size_t)cv->w * (size_t)cv->h * 4);
+            free(sc2);
+            free(src);
+            static seeker_tracks t;
+            memset(&t, 0, sizeof t);
+            add_node(&t, "R1", 0, -2, 0, 15);
+            add_node(&t, "R2", 3.6f, 2.6f, -90, 28);
+            if (seen[i]) {
+                seeker_track *k = add_track(&t, 1, "R1", sx[i], sy[i], "amber");
+                k->has_node_box = 1;
+                person_box(k->room_x_m, k->room_y_m, k->node_box);
+            }
+            if (hid[i]) {
+                /* Behind the wall, far enough that lying down stays clear of the plan inset. */
+                seeker_track *k = add_track(&t, 2, "R2", 1.0f, 3.6f, "cyan");
+                k->has_pts = 1;
+                k->posture = down[i] ? SEEKER_POSTURE_DOWN : SEEKER_POSTURE_STAND;
+                for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+                    k->pts[j][0] = down[i] ? POSE[j][1] : POSE[j][0]; /* lying: head to the left */
+                    k->pts[j][1] = down[i] ? -POSE[j][0] * 0.4f : POSE[j][1];
+                    k->pts[j][2] = 0.9f;
+                }
+            }
+            f->px = vid;
+            f->t_rx_ms = seeker_now_ms();
+            for (int h = 0; h < 3; h++)
+                health->slot[h].last_beat_ms = seeker_now_ms();
+            hud_state hs;
+            memset(&hs, 0, sizeof hs);
+            hs.t = &t;
+            hs.tracks_age_ms = 14;
+            hs.health = health;
+            hs.fps = 30;
+            hs.background = "wearer";
+            hs.view_node = "R1";
+            hs.video = f;
+            hs.video_fps = 15;
+            hs.wearer = &v;
+            hs.video_state = VIDEO_OK;
+            hs.video_why = VIDEO_WHY_OK;
+            hs.now_ms = 1000000 + tm[i];
+            double t0 = now_us();
+            hud_render(cv, cfg, &hs);
+            double ms = (now_us() - t0) / 1000.0;
+            if (pass > 0 && ms < best[slot][i])
+                best[slot][i] = ms;
+            if (pass == 0) {
+                char name[32];
+                snprintf(name, sizeof name, "f%03d", i);
+                if (write_png(outdir, name, cv))
+                    return 1;
+            }
+        }
+    }
+    anim_set_enabled(1);
+    free(vid);
+    double sum[2] = { 0, 0 }, worst[2] = { 0, 0 }, extra = -1e9;
+    int worst_at[2] = { 0, 0 }, extra_at = 0;
+    for (int i = 0; i < nf; i++) {
+        for (int k = 0; k < 2; k++) {
+            sum[k] += best[k][i];
+            if (best[k][i] > worst[k]) {
+                worst[k] = best[k][i];
+                worst_at[k] = tm[i];
+            }
+        }
+        if (best[0][i] - best[1][i] > extra) {
+            extra = best[0][i] - best[1][i];
+            extra_at = tm[i];
+        }
+    }
+    printf("demo %d frames %dx%d (fastest of 3 runs per frame): animations on %.3f ms per frame, worst %.3f "
+           "at %d ms; off %.3f, worst %.3f at %d ms; most the animations add to one frame %+.3f ms at %d ms\n",
+           nf, cv->w, cv->h, sum[0] / nf, worst[0], worst_at[0], sum[1] / nf, worst[1], worst_at[1], extra,
+           extra_at);
+    return 0;
+}
+#endif
+
 int main(int argc, char **argv)
 {
     const char *bg = NULL, *bg_close = NULL, *bg_down = NULL, *out = ".", *seq = NULL, *pseq = NULL;
+    const char *demo = NULL;
     int W = 1280, H = 720, classic_all = 0, reps = 20, t0 = -100, t1 = 700, dt = 20, perf = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--bg") && i + 1 < argc) bg = argv[++i];
@@ -566,6 +714,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--alert-seq") && i + 1 < argc) seq = argv[++i];
         else if (!strcmp(argv[i], "--person-seq") && i + 1 < argc) pseq = argv[++i];
+        else if (!strcmp(argv[i], "--demo") && i + 1 < argc) demo = argv[++i];
         else if (!strcmp(argv[i], "--t0") && i + 1 < argc) t0 = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--t1") && i + 1 < argc) t1 = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dt") && i + 1 < argc) dt = atoi(argv[++i]);
@@ -575,7 +724,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--classic-all")) classic_all = 1;
         else {
             fprintf(stderr, "usage: %s --bg frame.ppm [--bg-close frame.ppm] [--out dir] [--size WxH] "
-                            "[--classic-all] [--reps n] [--alert-seq dir] "
+                            "[--classic-all] [--reps n] [--alert-seq dir] [--demo dir] "
                             "[--person-seq appear|xray|lost|all [--t0 ms] [--t1 ms] [--dt ms] [--perf]]\n",
                     argv[0]);
             return 2;
@@ -628,9 +777,14 @@ int main(int argc, char **argv)
         free(cv.px);
         return rc;
     }
+    if (demo) {
+        int rc = run_demo(demo, &cv, &cfg, &health, &f);
+        free(cv.px);
+        return rc;
+    }
     anim_set_enabled(0); /* the stills show the settled look */
 #else
-    (void)seq, (void)pseq, (void)t0, (void)t1, (void)dt, (void)perf;
+    (void)seq, (void)pseq, (void)demo, (void)t0, (void)t1, (void)dt, (void)perf;
 #endif
     static const char *const states[] = { "normal", "close", "video-late", "map-fallback",
                                           "xray-no-skeleton", "down", "down-behind-wall" };

@@ -1,4 +1,5 @@
 #include "wearer_view.h"
+#include "anim.h"
 #include "anim_alert.h"
 #include "plan.h"
 #include "anim_person.h"
@@ -421,6 +422,7 @@ typedef struct {
     float fade_a;   /* plan marks: alpha factor (crossfade) */
     int n_fading;
     anim_fx fx;     /* plan: this person's alert animation (anim_alert.h), zero = none */
+    int cur_slot;   /* plan: wv_view.colours slot of the person being labelled, -1 none */
     ap_fx pfx;      /* plan: the person being drawn's animation (anim_person.h), 0 = none */
 } rc;
 
@@ -1064,6 +1066,20 @@ static void p_tag(rc *r, int bx, int by, int bw, float lead_dy, float dx, float 
         px = clampi(cand[pick][0], edge, W - pw - edge);
         py = place_label(r, px, clampi(cand[pick][1], edge, H - ph - edge), pw, ph);
     }
+    /* A plate that has to move (the layout changed) glides to its new spot (animations on). */
+    if (r->cur_slot >= 0 && r->view && anim_enabled()) {
+        wv_colour_slot *sl = &r->view->colours[r->cur_slot];
+        if (sl->plate_valid && (fabsf(sl->plate_x - (float)px) > 1.0f || fabsf(sl->plate_y - (float)py) > 1.0f)) {
+            sl->plate_x += P_PLATE_GLIDE * ((float)px - sl->plate_x);
+            sl->plate_y += P_PLATE_GLIDE * ((float)py - sl->plate_y);
+            px = (int)lroundf(sl->plate_x);
+            py = (int)lroundf(sl->plate_y);
+        } else {
+            sl->plate_x = (float)px;
+            sl->plate_y = (float)py;
+        }
+        sl->plate_valid = 1;
+    }
     if (pick >= 2) { /* above: a straight leader up from the box top */
         float lx = (float)clampi(px + pw / 2, bx + P(r, 6), bx + bw - P(r, 6));
         ap_leader(r->c, r->u, lx, (float)by, lx, (float)(py + ph), col, &r->pfx);
@@ -1485,7 +1501,9 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
             if (it->in_fov && pass == it->direct) {
                 if (i < SEEKER_MAX_TRACKS) {
                     r->pfx = anim_person_get(k->id);
+                    r->cur_slot = it->slot;
                     p_label(r, it, k, box[i]);
+                    r->cur_slot = -1;
                     memset(&r->pfx, 0, sizeof r->pfx);
                 }
                 if (it->direct)
@@ -1571,6 +1589,7 @@ void wv_render(canvas *c, const seeker_config *cfg, wv_view *v, const seeker_tra
     r.lw = cfg->line_px > 0 ? cfg->line_px : 2;
     r.stale = stale;
     r.plan = draw_theme() == DRAW_THEME_PLAN;
+    r.cur_slot = -1;
     r.u = plan_u(c);
     r.fade_a = 1.0f;
     int have_video = video && video->px && video->src_w > 0 && video->src_h > 0 &&

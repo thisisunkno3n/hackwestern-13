@@ -30,6 +30,7 @@
 #define P_HALO RGB(0, 0, 0)
 #define P_HALO_A 166   /* 65% */
 #define P_HALO_W 3.0f  /* px (at 720) wider than the stroke it sits under */
+#define P_PLATE_GLIDE 0.35f /* animations on: a moving plate covers this much of the way per frame */
 #define P_GROUND RGB(17, 18, 20) /* behind the full-screen plan */
 
 float plan_u(const canvas *c);
