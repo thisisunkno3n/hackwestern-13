@@ -51,6 +51,7 @@ typedef struct {
     int swap_rb;          /* PROPOSED: flip R and B if Screen's byte order differs on the Pi */
     int display_index;    /* PROPOSED: index into SCREEN_PROPERTY_DISPLAYS (0 is assumed HDMI0) */
     char theme[12];       /* "plan" (default) or "classic" (hud_display --theme) */
+    int anim;             /* plan theme animations: 1 (default) or 0 (display.anim, --anim) */
 
     /* fusion (PROPOSED section) */
     float fusion_rate_hz;

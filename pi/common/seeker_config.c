@@ -24,6 +24,7 @@ void seeker_config_defaults(seeker_config *c)
     snprintf(c->sink, sizeof c->sink, "screen");
     snprintf(c->background, sizeof c->background, "radar");
     snprintf(c->theme, sizeof c->theme, "plan");
+    c->anim = 1;
     snprintf(c->view_node, sizeof c->view_node, "R1");
     snprintf(c->mirror, sizeof c->mirror, "none");
     c->line_px = 2;
@@ -140,6 +141,15 @@ static void overlay(seeker_config *c, const char *s, const sj_tok *t)
         get_s(s, t, d, "sink", c->sink, sizeof c->sink);
         get_s(s, t, d, "background", c->background, sizeof c->background);
         get_s(s, t, d, "theme", c->theme, sizeof c->theme);
+        get_b(s, t, d, "anim", &c->anim); /* true / false, or "on" / "off" */
+        {
+            char a[8] = "";
+            get_s(s, t, d, "anim", a, sizeof a);
+            if (!strcmp(a, "off"))
+                c->anim = 0;
+            else if (!strcmp(a, "on"))
+                c->anim = 1;
+        }
         get_s(s, t, d, "view_node", c->view_node, sizeof c->view_node);
         get_s(s, t, d, "mirror", c->mirror, sizeof c->mirror);
         get_i(s, t, d, "line_px", &c->line_px);

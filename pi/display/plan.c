@@ -1,5 +1,6 @@
 #include "plan.h"
 #include "anim_alert.h"
+#include "anim_map.h"
 #include "video_rx.h"
 
 #include <math.h>
@@ -291,6 +292,7 @@ void plan_map(canvas *c, float u, int x, int y, int w, int h, float ppm, float w
               const wv_pose *wearer, const char *wearer_node, float hfov_deg, const wv_config *wc,
               const seeker_tracks *t, const plan_mark *marks, int n)
 {
+    anim_map_begin(header, marks, n);
     if (header) {
         draw_poly_style st = { 0 };
         st.fill = P_PLATE;
@@ -305,6 +307,8 @@ void plan_map(canvas *c, float u, int x, int y, int w, int h, float ppm, float w
     {
         int seg = (int)lroundf(ppm), bh = S(u, 5);
         int sx = x + w - 2 * seg - S(u, 52), sy = y + S(u, 15);
+        if (anim_map_scale_bar(c, u, sx, sy, seg, bh))
+            goto scale_done;
         draw_fill_a(c, sx, sy, seg, bh, P_INK, 255);
         draw_poly_style bs = { 0 };
         bs.edge = P_INK;
@@ -315,6 +319,7 @@ void plan_map(canvas *c, float u, int x, int y, int w, int h, float ppm, float w
         draw_ui_text_top(c, sx - S(u, 3), ly, lp, DRAW_FONT_MONO_REGULAR, P_INK, P_INK2_A, "0");
         draw_ui_text_top(c, sx + seg - S(u, 3), ly, lp, DRAW_FONT_MONO_REGULAR, P_INK, P_INK2_A, "1");
         draw_ui_text_top(c, sx + 2 * seg - S(u, 3), ly, lp, DRAW_FONT_MONO_REGULAR, P_INK, P_INK2_A, "2 m");
+    scale_done:;
     }
     /* Everything else is clipped to the drawing area: a canvas view onto it. */
     int top = header ? S(u, 40) : S(u, 40);
@@ -326,20 +331,30 @@ void plan_map(canvas *c, float u, int x, int y, int w, int h, float ppm, float w
     if (cw <= 4 || ch <= 4)
         return;
     canvas v = { c->px + (size_t)cy0 * (size_t)c->stride + (size_t)cx0, cw, ch, c->stride };
+    /* Rings (anim_map) may spill past the drawing area onto the whole plate. */
+    int rx0 = x + 1 > 0 ? x + 1 : 0, ry0 = y + 1 > 0 ? y + 1 : 0;
+    int rx1 = x + w - 1 < c->w ? x + w - 1 : c->w, ry1 = y + h - 1 < c->h ? y + h - 1 : c->h;
+    canvas rv = { c->px + (size_t)ry0 * (size_t)c->stride + (size_t)rx0, rx1 - rx0, ry1 - ry0, c->stride };
     plan_geo g = { (float)w * 0.5f - 1.0f, (float)(y + (int)lroundf((float)h * wy)) - (float)cy0, ppm,
                    wearer->yaw_deg, wearer };
     float far = (float)(cw + ch) * 2.0f;
 
     /* Wearer view cone. */
-    float half = hfov_deg * 0.5f * DEG2RAD;
-    for (int s = -1; s <= 1; s += 2)
-        draw_dashed_aa(&v, g.ax, g.ay, g.ax + s * far * sinf(half), g.ay - far * cosf(half), 1.0f * u, 6 * u,
+    float half = hfov_deg * 0.5f * DEG2RAD, fk = anim_map_grow(ANIM_MAP_CONE, far, g.ay / cosf(half));
+    for (int s = -1; s <= 1 && fk > 0; s += 2)
+        draw_dashed_aa(&v, g.ax, g.ay, g.ax + s * fk * sinf(half), g.ay - fk * cosf(half), 1.0f * u, 6 * u,
                        5 * u, DRAW_CAP_BUTT, P_INK, 115);
+    anim_map_scan(&v, u, g.ax, g.ay, half, far);
     /* Walls in poche: light fill, dense hatch, solid outline. */
     for (int i = 0; wc && i < wc->n_walls; i++) {
         float ax, ay, bx, by;
         to_map(&g, wc->walls[i][0], wc->walls[i][1], &ax, &ay);
         to_map(&g, wc->walls[i][2], wc->walls[i][3], &bx, &by);
+        float wk = anim_map_draw_in(ANIM_MAP_WALL, i, wc->n_walls);
+        if (wk < 1.0f) { /* drawing in: the wall grows from its first end */
+            bx = ax + (bx - ax) * wk;
+            by = ay + (by - ay) * wk;
+        }
         float dx = bx - ax, dy = by - ay, L = sqrtf(dx * dx + dy * dy);
         if (L < 1)
             continue;
@@ -367,7 +382,7 @@ void plan_map(canvas *c, float u, int x, int y, int w, int h, float ppm, float w
         nx = clampf(nx, 8 * u, (float)cw - 8 * u);
         ny = clampf(ny, 8 * u, (float)ch - 8 * u);
         int a = !strcmp(nd->state, "ok") ? 255 : 120;
-        float cone = 3.5f * ppm, hf = (nd->hfov_deg > 1 ? nd->hfov_deg : 66) * 0.5f;
+        float cone = 3.5f * ppm * anim_map_draw_in(ANIM_MAP_PHONE, 0, 1), hf = (nd->hfov_deg > 1 ? nd->hfov_deg : 66) * 0.5f;
         for (int s = -1; s <= 1; s += 2) {
             float h2 = (nd->yaw_deg - wearer->yaw_deg + s * hf) * DEG2RAD;
             draw_dashed_aa(&v, nx, ny, nx + cone * sinf(h2), ny - cone * cosf(h2), 1.0f * u, 3 * u, 4 * u,
@@ -390,11 +405,19 @@ void plan_map(canvas *c, float u, int x, int y, int w, int h, float ppm, float w
         px = clampf(px, 7 * u, (float)cw - 7 * u);
         py = clampf(py, 7 * u, (float)ch - 7 * u);
         float s = 10 * u;
+        anim_map_rings(&rv, u, m, px + (float)(cx0 - rx0), py + (float)(cy0 - ry0));
         if (m->kind == PLAN_SEEN)
             plan_square(&v, u, px, py, s, m->close ? P_ALERT : P_SEEN, 255);
-        else
-            plan_dash_rect(&v, u, px - s / 2, py - s / 2, s, s, 2 * u, 3 * u, 2 * u, m->close ? P_ALERT : P_HIDDEN,
-                           255);
+        else {
+            /* Behind a wall: the ring (above), then a halo that marches with the dashes, then the
+             * square; the static dashed square (with its halo) when the map is not animating. */
+            uint32_t hc = m->close ? P_ALERT : P_HIDDEN;
+            if (anim_map_hidden_rect(&v, px - s / 2, py - s / 2, s, 2 * u + P_HALO_W * u, 3 * u, 2 * u, P_HALO,
+                                     halo_a(255)))
+                anim_map_hidden_rect(&v, px - s / 2, py - s / 2, s, 2 * u, 3 * u, 2 * u, hc, 255);
+            else
+                plan_dash_rect(&v, u, px - s / 2, py - s / 2, s, s, 2 * u, 3 * u, 2 * u, hc, 255);
+        }
         if (m->label[0])
             draw_ui_text_top(&v, (int)lroundf(px + 10 * u), (int)lroundf(py - 9 * u), S(u, 13), DRAW_FONT_MONO,
                              m->close ? P_ALERT : m->kind == PLAN_SEEN ? P_SEEN : P_HIDDEN, 255, m->label);

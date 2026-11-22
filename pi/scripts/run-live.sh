@@ -99,6 +99,7 @@
 #   VSYNC       0 = posts do not wait for vsync (hud_display --vsync off; may tear; the latency
 #               line's "post" stage shows the wait it saves). Default 1.
 #   THEME       HUD look: plan (default, Daniel's drafting theme) or classic (hud_display --theme)
+#   ANIM        plan theme animations: on (default) or off (hud_display --anim); classic ignores it
 #   SINK        screen (ppm or none to try it without the monitor)
 #   BRIDGE      seeker (video_ctrl, video link at once, status lines) or daniel (ws_ingest.py as is)
 #   FUSION_DEBUG 1 = hud_fusion --debug   QUIET 1 = logs to files only
@@ -158,6 +159,7 @@ LAT_BASE_MS=${LAT_BASE_MS:-0}
 SCREEN_BUFFER=${SCREEN_BUFFER:-}
 THEME=${THEME:-}
 VSYNC=${VSYNC:-1}
+ANIM=${ANIM:-}
 SINK=${SINK:-screen}
 BRIDGE=${BRIDGE:-seeker}
 FUSION_DEBUG=${FUSION_DEBUG:-1}
@@ -282,6 +284,11 @@ case "$THEME" in
   '') ;;
   plan | classic) set -- "$@" --theme "$THEME" ;;
   *) die "THEME must be plan or classic, not $THEME" ;;
+esac
+case "$ANIM" in
+  '') ;;
+  on | off) set -- "$@" --anim "$ANIM" ;;
+  *) die "ANIM must be on or off, not $ANIM" ;;
 esac
 if [ "$WALLS" = none ]; then
   set -- "$@" --no-walls

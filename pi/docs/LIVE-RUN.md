@@ -428,7 +428,14 @@ smoke alike. Plates keep their dark fill and near-white text. The tokens live in
 ```sh
 build/hud_display ... --theme classic     # or "theme": "classic" in the config's display object
 cd ~/seeker/drafts/pi-lane && THEME=classic sh scripts/run-live.sh   # or HUD_ARGS="--theme classic"
+build/hud_display ... --anim off          # still plan theme; or "anim": false in the display object
+cd ~/seeker/drafts/pi-lane && ANIM=off sh scripts/run-live.sh
 ```
+
+The plan theme animates by default (state changes, people arriving and leaving, the map); all of
+it is decoration on one switch, `--anim on|off` (`display.anim`, `ANIM=` in `run-live.sh`), and off
+draws the still plan theme exactly. The classic theme never animates. Every animation runs on one
+timestamp per frame, `hud_state.now_ms`, which `hud_render` hands to all three modules.
 
 | Plan theme shows | Means |
 | --- | --- |
@@ -451,8 +458,8 @@ breathing pulse of the frame (1.2 s, alpha 70% to 100%). Leaving an alert, the c
 over 200 ms. A title block cell whose words change crossfades over 150 ms (the new value starts at
 60%); a change of digits only (the clock, "1.2 s late", fps) swaps at once. Warning plates slide 8
 px in from above while fading in (150 ms) and leave the same way. Everything runs on one timestamp
-per frame (`hud_state.now_ms`), so `hud_shot --seq DIR` renders any moment; `now_ms` 0 or
-`anim_alert_set_enabled(0)` gives the still plan look exactly.
+per frame (`hud_state.now_ms`), so `hud_shot --alert-seq DIR` renders any moment; `now_ms` 0 or
+`--anim off` gives the still plan look exactly.
 
 Stale people are drawn faded rather than grey. The theme only changes drawing: tracking, the
 colour hysteresis and the fallback rules are the same as classic.
@@ -465,11 +472,18 @@ the ghost starts at 60% and is full in 150 ms, the hull hatch sweeps in from the
 (220 ms), then leader and plate. A person no longer drawn leaves a fading echo of their last frame or
 ghost for 220 ms (50% to 0, no plate). Hidden-person dashes march slowly (12 px/s). Someone who
 comes back within 2 s keeps their plate up. Words and distances are never animated.
-`tools/hud_shot --seq appear|xray|lost|all` renders the animations frame by frame (`--perf` times
-them); the stills are drawn settled.
+`tools/hud_shot --person-seq appear|xray|lost|all` renders the animations frame by frame (`--perf`
+times them); the stills are drawn settled.
+
+The plan map animates too (display/anim_map.c, the corner inset and the full-screen plan), never a
+position: someone new on the map gets one ring ping from their square (450 ms); someone down a slow
+ring every 1.4 s; a faint scan line sweeps the wearer's view cone every 3 s; hidden people's dashed
+squares march round; and on first show cones, walls and the scale bar draw in over 300 ms.
+`tools/hud_anim_map_shot` renders map sequences (`tools/anim_map_media.sh` makes media).
 `tools/hud_shot` renders both themes of a made-up scene on a laptop (no phones, no Pi):
 `python3 tools/hud_shot_room.py room.png` then convert it to PPM and run
-`build/hud_shot --bg room.ppm --out shots/` (`--seq anim/` for the animation sequences).
+`build/hud_shot --bg room.ppm --out shots/` (`--alert-seq DIR`, `--person-seq NAME` and `--demo DIR`
+for the animations; `--demo` is all of them in one 7.5 s sequence).
 
 ### Box colours (wearer view)
 

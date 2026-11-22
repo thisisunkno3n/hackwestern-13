@@ -60,8 +60,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #ifndef HUD_SHOT_CLASSIC_ONLY
-#include "anim_alert.h"
-#include "anim_person.h"
+#include "anim.h"
 #endif
 
 static uint32_t *load_ppm(const char *path, int *w, int *h)
@@ -483,7 +482,7 @@ static void ps_frame(canvas *cv, const seeker_config *cfg, hud_state *hs, video_
     int a, b;
     ps_who(seq, tm, &a, &b);
     ps_scene(t, a, b);
-    v->clock_ms = 100000 + tm;
+    hs->now_ms = v->clock_ms = 100000 + tm; /* one frame time for every module */
     f->t_rx_ms = seeker_now_ms();
     for (int i = 0; i < 3; i++)
         health->slot[i].last_beat_ms = seeker_now_ms();
@@ -629,7 +628,7 @@ int main(int argc, char **argv)
         free(cv.px);
         return rc;
     }
-    anim_person_set_enabled(0); /* the stills show the settled look */
+    anim_set_enabled(0); /* the stills show the settled look */
 #else
     (void)seq, (void)pseq, (void)t0, (void)t1, (void)dt, (void)perf;
 #endif
