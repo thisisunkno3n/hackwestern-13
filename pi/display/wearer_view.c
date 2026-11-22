@@ -1167,9 +1167,9 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
         fs.edge_a = a;
         fs.edge_w = 2.0f * r->u;
         float my = y + h * 0.5f, t8 = 8 * r->u;
-        plan_halo_rect(r->c, r->u, (float)x, (float)y, (float)w, (float)h, 0, fs.edge_w, a);
         plan_halo_line(r->c, r->u, x - t8, my, x + t8, my, 2 * r->u, DRAW_CAP_BUTT, a);
         plan_halo_line(r->c, r->u, x + w - t8, my, x + w + t8, my, 2 * r->u, DRAW_CAP_BUTT, a);
+        plan_halo_style(&fs, r->u, a);
         draw_cut_rect(r->c, (float)x, (float)y, (float)w, (float)h, 0, &fs);
         draw_line_aa(r->c, x - t8, my, x + t8, my, 2 * r->u, DRAW_CAP_BUTT, col, a);
         draw_line_aa(r->c, x + w - t8, my, x + w + t8, my, 2 * r->u, DRAW_CAP_BUTT, col, a);
@@ -1219,7 +1219,8 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
     hs.hatch_a = (int)(ap_alpha(&r->pfx, 18) * r->fade_a); /* 7% */
     hs.hatch_gap = 12 * r->u;
     hs.hatch_w = 2 * r->u;
-    ap_hatch_rect(r->c, (float)x, (float)y, (float)w, (float)h, &hs, &r->pfx);
+    if (hs.hatch_a >= 10 && !r->pfx.echo) /* a 4% hatch or an echo's is not worth the fill */
+        ap_hatch_rect(r->c, (float)x, (float)y, (float)w, (float)h, &hs, &r->pfx);
     plan_dash_rect(r->c, r->u, (float)x, (float)y, (float)w, (float)h, 1.5f * r->u, 10 * r->u, 7 * r->u, P_HIDDEN,
                    a * 55 / 100);
     anim_alert_hull(r->c, r->u, &r->fx, (float)x, (float)y, (float)w, (float)h, r->fade_a);

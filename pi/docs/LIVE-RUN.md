@@ -457,7 +457,8 @@ drawn in full on that frame, and nobody's drawn position or size is eased beyond
 box smoothing. Entering an alert, the frame, plate edge and words turn magenta at once and the
 plate hatch sweeps in from the bottom-left corner (from 20%, full by 200 ms). Person down (in view,
 or behind a wall on the ghost's hull) adds one ring ping out from the frame (500 ms), then a calm
-breathing pulse of the frame (1.2 s, alpha 70% to 100%). Leaving an alert, the colours blend back
+breathing pulse of the frame (1.2 s, alpha 70% to 100%); behind a wall that pulse is one solid
+magenta outline on the hull. Leaving an alert, the colours blend back
 over 200 ms. A title block cell whose words change crossfades over 150 ms (the new value starts at
 60%); a change of digits only (the clock, "1.2 s late", fps) swaps at once. Warning plates slide 8
 px in from above while fading in (150 ms) and leave the same way. Everything runs on one timestamp

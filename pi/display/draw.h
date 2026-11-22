@@ -86,6 +86,11 @@ typedef struct {
     uint32_t edge;
     int edge_a;
     float edge_w;
+    /* Optional halo: an outline of width halo_w under everything above, blended into each pixel
+     * first (the same pixels as a separate halo outline drawn before, in one pass). */
+    uint32_t halo;
+    int halo_a;
+    float halo_w;
 } draw_poly_style;
 void draw_poly(canvas *c, const float *xy, int n, const draw_poly_style *st);
 /* Rectangle with its top-right corner cut at 45 degrees by `cut` px (the plan theme's plate). */
