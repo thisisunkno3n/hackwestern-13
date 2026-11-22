@@ -599,6 +599,44 @@ someone walking at 0.8 m/s it leads the picture by about 0.15 m (about 30 px at 
 small next to R2's range error, which the two-phone fix removes once R1 sees them.
 `FUSION_ARGS="--predict-ms 0"` takes the 100 ms out if the lead shows.
 
+## Walking behind the wall: no splayed ghost
+
+Someone partly or mostly behind the divider's edge in R1's view: the pose model still places every
+hidden joint (pushed on into the wall, at visibility 0.3 to 0.8), and now and then it returns a
+confident guess of the whole body. Before, one such frame made R1 "see the whole person": the
+ghost restarted in R1's guessed view and the crossfade back to seen drew it for 250 ms, limbs
+fanned into the wall like a '<'. A person R2 lost for a moment also glided from where their old
+walking speed would have taken them (about 0.4 m on, into the wall) and back. Now
+(`seeker_fusion.h` `SEEKER_OCCL_*`, on with the handoff):
+
+- A whole sighting within 8 deg of where the same phone saw only part of someone in the last
+  second is held partial until 3 whole messages in a row (it still counts in the two-phone fix).
+- The ghost's joints: none from past the frame's edge, none under visibility 0.5 from a partial
+  view, a jump past half a person height only once a second message agrees; with every view
+  partial, the most complete one. The HUD's outgoing ghost keeps its last x-ray shape.
+- The handoff glide starts where the person was drawn; R1's lone partial sighting keeps the
+  track's distance instead of walking it on along its ray.
+
+Host replay (`build/test_occlusion`, ctest `occlusion`, 10 seeds; before = `--no-occl-guard`):
+
+| Scene | Before | After |
+| --- | --- | --- |
+| Lingers at the edge | 8 splayed ghost frames, 0.25 person heights off, 0.26 joint jump | none, 0.11, 0.03 |
+| The same, R2's frame edge cuts them | 9 splayed (R2's off-frame arm drawn), 23 ghost frames | none, 76 ghost frames |
+| R2 loses them 400 ms, they stop | 0.46 m past the stop, 0.43 m step back | 0.02 m, 0.03 m |
+
+Position steps and errors stay as before (within 5 cm). Logs: `hud_fusion.log` starts with
+`occlusion guard: ...`; each held frame episode logs
+`NODE R1 occl: whole sighting R1-p3 at -4.1 deg held partial, part of someone seen there 66 ms ago`.
+On the Pi (QNX sh and grep, no GNU options):
+
+```sh
+grep -E 'occlusion guard|occl: whole sighting|posture' ~/seeker-logs/hud_fusion.log | tail -30
+grep -c 'occl: whole sighting' ~/seeker-logs/hud_fusion.log
+```
+
+`FUSION_ARGS=--no-occl-guard sh scripts/run-live.sh` is the old behaviour, to compare.
+
 ## Morrissette calibration (tag 0 only, both phones fixed)
 
 Tag 7 is not needed: `R2_MODE` defaults to `pin` and `WEARER_MODE=fixed` pins R1, both from
