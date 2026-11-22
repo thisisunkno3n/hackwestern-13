@@ -1399,6 +1399,7 @@ static void test_wearer_render_mirror(void)
     memset(&t, 0, sizeof t);
     add_node(&t, "W", "ok", 0, 0, 0);
     add_track(&t, "R1", "R1", 1, -1.0f, 4.5f);
+    memset(v.colours, 0, sizeof v.colours); /* another scene: not the seen person held */
     wv_render(&c, &cfg, &v, &t, 0, NULL);
     CHECK(count_colour(&c, C_CYAN, 0, W / 2, 0, body) > 50);
     CHECK(count_colour(&c, C_CYAN, W / 2, W, 0, body) == 0);
@@ -2526,6 +2527,7 @@ static void test_behind_wall_and_live_pose(void)
         add_node(&vt, "R1", "ok", 0, 0, 0);
         add_node(&vt, "R2", "ok", 0, 2, 180);
         add_track(&vt, "R2", "R2", 1, 0.1f, 4.0f);
+        memset(vv.colours, 0, sizeof vv.colours); /* another scene: not the seen person held */
         wv_render(&c, &cfg, &vv, &vt, 0, NULL);
         CHECK(vv.last.n_xray == 1 && vv.last.n_off == 0);
 
@@ -3554,6 +3556,7 @@ static void test_plan_render(void)
     snprintf(k->nodes, sizeof k->nodes, "R2");
     k->room_y_m = 3.0f;
     k->has_pts = 1;
+    memset(v.colours, 0, sizeof v.colours); /* another scene: not the seen person held */
     wv_render(&c, &cfg, &v, &t, 0, NULL);
     printf("plan down behind wall: %d red px, %d hidden-line px\n", count_near_rgb(&c, P_RED, 70, 0, W, 0, H),
            count_warm(&c, 0, W, 0, H));

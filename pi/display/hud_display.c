@@ -14,7 +14,7 @@
  *               [--wearer-pose-src auto|static|fusion] [--wearer-hfov deg] [--wearer-image WxH]
  *               [--wearer-cam-h m] [--wearer-pitch deg] [--xray-up deg] [--person-h m]
  *               [--pitch-auto on|off] [--wall x1,y1,x2,y2|none]... [--no-walls] [--visor] [--no-inset] [--mirror]
- *               [--video-fallback black|radar]
+ *               [--video-fallback black|radar] [--handoff on|off]
  *               [--pose ID=x,y,yaw]... [--poses FILE]   (hud_fusion's format; the wearer
  *               node's entry pins its pose)
  *
@@ -87,7 +87,7 @@ static int usage(const char *argv0)
             "       [--wearer-pose-src auto|static|fusion] [--wearer-hfov deg]\n"
             "       [--wearer-image WxH] [--wearer-cam-h m] [--wearer-pitch deg] [--xray-up deg]\n"
             "       [--person-h m] [--pitch-auto on|off] [--wall x1,y1,x2,y2|none]... [--no-walls]\n"
-            "       [--visor] [--no-inset] [--video-fallback black|radar]\n"
+            "       [--visor] [--no-inset] [--video-fallback black|radar] [--handoff on|off]\n"
             "       [--pose ID=x,y,yaw]... [--poses FILE]\n",
             argv0);
     return 2;
@@ -103,7 +103,7 @@ int main(int argc, char **argv)
     double run_for = 0;
     const char *w_node = NULL, *w_pose = NULL, *w_src = NULL, *w_image = NULL, *w_fallback = NULL;
     float w_hfov = 0, w_cam_h = 0, w_pitch = 0, w_xray_up = 0, w_person_h = 0;
-    int w_pitch_set = 0, w_up_set = 0, w_pitch_auto = -1;
+    int w_pitch_set = 0, w_up_set = 0, w_pitch_auto = -1, w_handoff = -1;
     int w_visor = 0, w_no_inset = 0, n_walls = 0, clear_walls = 0;
     const char *view_mode = NULL;
     float walls[WV_MAX_WALLS][4];
@@ -177,6 +177,14 @@ int main(int argc, char **argv)
                 return 2;
             }
             w_pitch_auto = !strcmp(pa, "on");
+        }
+        else if (!strcmp(a, "--handoff") && v) {
+            const char *ho = argv[++i];
+            if (strcmp(ho, "on") && strcmp(ho, "off")) {
+                fprintf(stderr, "--handoff wants on or off, got %s\n", ho);
+                return 2;
+            }
+            w_handoff = !strcmp(ho, "on");
         }
         else if (!strcmp(a, "--no-walls"))
             clear_walls = 1;
@@ -267,6 +275,7 @@ int main(int argc, char **argv)
     if (w_up_set) wearer.cfg.xray_up_deg = w_xray_up;
     if (w_person_h > 0) wearer.cfg.cam.person_h_m = w_person_h;
     if (w_pitch_auto >= 0) wearer.cfg.pitch_auto = w_pitch_auto;
+    if (w_handoff >= 0) wearer.cfg.handoff = w_handoff;
     if (w_image && sscanf(w_image, "%dx%d", &wearer.cfg.cam.image_w, &wearer.cfg.cam.image_h) != 2) {
         fprintf(stderr, "--wearer-image wants WxH, got %s\n", w_image);
         return 2;
@@ -342,6 +351,11 @@ int main(int argc, char **argv)
                    w->cam.cam_h_m, w->cam.pitch_deg,
                    w->cam.person_h_m > 0.5f ? w->cam.person_h_m : WV_PERSON_H_M, w->xray_up_deg,
                    w->node, w->pitch_auto ? "on" : "off");
+        if (w->handoff)
+            seeker_log("eagleeye: handoff: a person %s saw stays seen %d ms, x-ray to seen crossfades "
+                       "over %d ms (plan theme)", w->node, WV_SEEN_HOLD_MS, WV_XFADE_MS);
+        else
+            seeker_log("eagleeye: handoff: off (--handoff off)");
     }
 
     /* Decode below the draw loop (IF-3: 50 fifo) but above fusion (30) and hud_stress (10), so

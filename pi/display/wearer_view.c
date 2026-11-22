@@ -28,6 +28,7 @@ void wv_config_defaults(wv_config *w)
     w->assoc_range_m = 1.5f;
     w->yaw_alpha = 0.35f;
     w->inset = 1;
+    w->handoff = 1;
 }
 
 int wv_parse_pose(const char *s, char *node, int nodesz, wv_pose *out)
@@ -274,6 +275,7 @@ int wv_classify(const seeker_tracks *t, const wv_config *w, const wv_pose *pose,
         memset(it, 0, sizeof *it);
         it->idx = i;
         it->dup_of = -1;
+        it->fade = 1.0f;
         it->direct = wv_seen_by(k->nodes, k->node_id, w->node);
         if (k->has_room) {
             wv_project_point(pose, &w->cam, k->room_x_m, k->room_y_m, &it->p);
@@ -369,7 +371,12 @@ int wv_classify(const seeker_tracks *t, const wv_config *w, const wv_pose *pose,
             float db = fabsf(wv_wrap180(o->bearing_deg - d->bearing_deg));
             if (db > best_d)
                 continue;
-            if (o->has_range && d->has_range && fabsf(o->range_m - d->range_m) > w->assoc_range_m)
+            /* Mono ranges are +-10 to 30%: with the handoff on, the gap may grow with the range
+             * (35% past assoc_range_m / 0.35, 4.3 m at the default 1.5 m). */
+            float tol = w->assoc_range_m;
+            if (w->handoff && o->has_range && d->has_range)
+                tol *= fmaxf(1.0f, 0.35f * fmaxf(o->range_m, d->range_m) / 1.5f);
+            if (o->has_range && d->has_range && fabsf(o->range_m - d->range_m) > tol)
                 continue;
             best = b;
             best_d = db;
@@ -409,6 +416,8 @@ typedef struct {
     wv_view *view;  /* per-track display state (colour, eased box) */
     int plan;       /* draw_theme() == DRAW_THEME_PLAN */
     float u;        /* plan: frame height / 720 */
+    float fade_a;   /* plan marks: alpha factor (crossfade) */
+    int n_fading;
 } rc;
 
 static int clampi(int v, int lo, int hi)
@@ -465,6 +474,21 @@ static void assign_levels(wv_view *v, const seeker_config *cfg, const seeker_tra
         if (slot) {
             slot->seen_ms = now;
             it->slot = (int)(slot - v->colours);
+        }
+        if (slot && v->cfg.handoff) {
+            int raw = it->direct;
+            if (raw)
+                slot->direct_ms = now;
+            int want = raw || (slot->shown_direct && now - slot->direct_ms <= WV_SEEN_HOLD_MS);
+            if (slot->shown && want != slot->shown_direct)
+                slot->xfade_ms = now;
+            slot->shown = 1;
+            slot->shown_direct = want;
+            it->direct = want;
+            it->held = want && !raw;
+            v->last.n_held += it->held;
+            if (slot->xfade_ms && now - slot->xfade_ms < WV_XFADE_MS)
+                it->fade = (float)(now - slot->xfade_ms) / (float)WV_XFADE_MS;
         }
         if (!it->direct || !it->has_range)
             continue;
@@ -1108,7 +1132,7 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
     int st = p_stale(r, k);
     if (it->direct) {
         uint32_t col = p_alarm(r, it, k) ? P_RED : P_INK;
-        int a = st ? 115 : 255;
+        int a = (int)((st ? 115 : 255) * r->fade_a);
         draw_poly_style fs = { 0 };
         fs.edge = col;
         fs.edge_a = a;
@@ -1119,7 +1143,7 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
         draw_line_aa(r->c, x + w - t8, my, x + w + t8, my, 2 * r->u, DRAW_CAP_BUTT, col, a);
         return;
     }
-    int a = st ? 120 : 255;
+    int a = (int)((st ? 120 : 255) * r->fade_a);
     if (it->has_ray_span)
         draw_dashed_aa(r->c, (float)to_sx(r, it->ray_u0), (float)to_sy(r, it->ray_v0), (float)to_sx(r, it->ray_u1),
                        (float)to_sy(r, it->ray_v1), 2 * r->u, 10 * r->u, 7 * r->u, DRAW_CAP_BUTT, P_HIDDEN, a * 7 / 10);
@@ -1159,7 +1183,7 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
     }
     draw_poly_style hs = { 0 };
     hs.hatch = P_HIDDEN;
-    hs.hatch_a = 18; /* 7% */
+    hs.hatch_a = (int)(18 * r->fade_a); /* 7% */
     hs.hatch_gap = 12 * r->u;
     hs.hatch_w = 2 * r->u;
     draw_cut_rect(r->c, (float)x, (float)y, (float)w, (float)h, 0, &hs);
@@ -1365,8 +1389,19 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 d[6] = it->level;
             }
             r->n_posture[k->posture >= 0 && k->posture <= SEEKER_POSTURE_DOWN ? k->posture : 0]++;
-            /* Marks: people behind walls first, then seen people over them. */
+            /* Marks: people behind walls first, then seen people over them. A change of look
+             * dissolves: the old look fades out in the same box while the new one fades in. */
+            if (it->fade < 1.0f) {
+                wv_item old = *it;
+                old.direct = !it->direct;
+                int ob[4] = { box[i][0], box[i][1], box[i][2], box[i][3] };
+                r->fade_a = 1.0f - it->fade;
+                p_marks(r, &old, k, ob);
+                r->fade_a = it->fade;
+                r->n_fading++;
+            }
             p_marks(r, it, k, box[i]);
+            r->fade_a = 1.0f;
             /* Labels come after all marks and keep off every figure (plates move up or down). */
             /* A standing ghost's head ring rises above its hull; a lying one's is inside it. */
             int head = it->direct || p_down(k) ? 0 : box[i][3] / 8;
@@ -1442,6 +1477,7 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
     if (wt[0])
         plan_plate(c, r->u, P(r, 24), P(r, 24), wl, wn, wedge, 0);
     s->n_skel = r->n_skel;
+    s->n_fading = r->n_fading;
     memcpy(s->n_posture, r->n_posture, sizeof s->n_posture);
     s->n_drawn = r->n_drawn;
     for (int i = 0; i < r->n_drawn; i++) {
@@ -1474,6 +1510,7 @@ void wv_render(canvas *c, const seeker_config *cfg, wv_view *v, const seeker_tra
     r.stale = stale;
     r.plan = draw_theme() == DRAW_THEME_PLAN;
     r.u = plan_u(c);
+    r.fade_a = 1.0f;
     int have_video = video && video->px && video->src_w > 0 && video->src_h > 0 &&
                      video->rect[2] > 0 && video->rect[3] > 0;
     int other_node = have_video && video->node_id[0] && strcmp(video->node_id, w->node) != 0;

@@ -58,6 +58,8 @@ typedef struct {
      * corrected from people R1 itself sees whole (its own boxes against the projection). */
     float xray_up_deg;
     int pitch_auto;
+    int handoff; /* 1 (default): SEEN hold (WV_SEEN_HOLD_MS), crossfade (WV_XFADE_MS) and a
+                  * range-relative duplicate check; hud_display --handoff off */
 } wv_config;
 
 typedef struct {
@@ -77,6 +79,8 @@ typedef struct {
     int level;        /* seen person's SEEKER_RED / AMBER / GREEN (wv_render), -1 without range */
     int slot;         /* index into wv_view.colours for this track (wv_render), -1 none */
     int closing;      /* seen person approaching fast (the colour state's hysteresis), plan theme */
+    int held;         /* drawn as seen though the wearer's phone missed them this frame */
+    float fade;       /* 0..1: how far the crossfade from the other look is (1: done) */
 } wv_item;
 
 #define WV_COLOUR_SLOTS 32
@@ -87,7 +91,18 @@ typedef struct {
     seeker_colour c;  /* range from the wearer, with hysteresis (seeker_colour.h) */
     int box_valid;    /* eased screen box (WV_BOX_EASE), snapped on a jump */
     float bx, by, bw, bh;
+    int shown;        /* drawn before: a change of look crossfades */
+    int shown_direct; /* drawn as seen (with the WV_SEEN_HOLD_MS hold) */
+    int64_t direct_ms, xfade_ms; /* last frame the wearer's phone saw them; start of the crossfade */
 } wv_colour_slot;
+
+/* Handoff between x-ray and seen (wv_config.handoff). The wearer's phone misses a person now and
+ * then (a frame under its confidence cut, a hand at a wall edge): a person seen stays seen for
+ * WV_SEEN_HOLD_MS, so the look does not flip at the phone's frame rate. A change of look
+ * (x-ray ghost to seen box or back) crossfades over WV_XFADE_MS in the plan theme, both drawn in
+ * the same eased box. */
+#define WV_SEEN_HOLD_MS 400
+#define WV_XFADE_MS 250
 
 /* Drawn boxes move this fraction of the way to the new box each frame (30 fps: about 50 ms of
  * lag), so detection-box noise and 15 Hz steps do not shake the overlay; a jump larger than
@@ -105,6 +120,8 @@ typedef struct {
     int n_skel;      /* x-ray people drawn as ghost skeletons (track pts) */
     int n_posture[4]; /* people in view by SEEKER_POSTURE_* (unknown, stand, crouch, down) */
     int n_drawn;      /* boxes drawn in view this frame (tests and the smoothness sim) */
+    int n_held;       /* drawn as seen through WV_SEEN_HOLD_MS */
+    int n_fading;     /* crossfading between x-ray and seen */
     struct {
         int id, direct, x, y, w, h, level;
     } drawn[SEEKER_MAX_TRACKS];
