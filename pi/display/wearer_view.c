@@ -415,7 +415,9 @@ typedef struct {
     int n_skel;     /* x-ray people drawn as ghost skeletons */
     int n_posture[4]; /* people in view by SEEKER_POSTURE_* */
     int n_drawn;
-    int drawn[SEEKER_MAX_TRACKS][7]; /* id, direct, x, y, w, h, level */
+    int drawn[SEEKER_MAX_TRACKS][9]; /* id, direct, x, y, w, h, level, skeleton top and bottom row */
+    int skel_y0, skel_y1; /* canvas rows of the last ghost skeleton's highest and lowest joint */
+    int64_t now;    /* the frame's timestamp, ms */
     wv_view *view;  /* per-track display state (colour, eased box) */
     int plan;       /* draw_theme() == DRAW_THEME_PLAN */
     float u;        /* plan: frame height / 720 */
@@ -551,6 +553,12 @@ static void learn_tilt(wv_view *v, const wv_camera *cam, const seeker_tracks *t,
         if (top < 0.02f * H || bot > 0.98f * H || k->node_box[3] < 0.15f * H || it->p.box_h <= 0 ||
             it->range_m < 0.8f || it->range_m > 8.0f)
             continue;
+        /* Only a whole standing person is where the projected box is: someone crouched, or cut
+         * off at the legs by a box that stops short of the frame's edge, has a box whose middle
+         * says nothing about the tilt (and the tilt it would teach draws x-ray people too big). */
+        if (k->posture == SEEKER_POSTURE_CROUCH || k->posture == SEEKER_POSTURE_DOWN ||
+            k->node_box[3] < WV_TILT_BOX_MIN * it->p.box_h || k->node_box[3] > WV_TILT_BOX_MAX * it->p.box_h)
+            continue;
         float v_obs = 0.5f * (top + bot), v_pred = it->p.box_y + 0.5f * it->p.box_h;
         float d = (atanf((v_obs - H * 0.5f) / f) - atanf((v_pred - H * 0.5f) / f)) * 57.29578f;
         if (fabsf(d) > 25.0f)
@@ -565,15 +573,30 @@ static void item_box(const rc *r, const wv_item *it, const seeker_track *k, int 
                      int *h)
 {
     const wv_camera *cc = &r->cam;
+    /* A seen person is drawn in the wearer phone's own box. In a frame that phone missed them
+     * (the SEEN hold, WV_SEEN_HOLD_MS) the track carries another phone's box, so the last own box
+     * stays: the projected one is a standing person from the floor to the top of the head, far
+     * bigger than the own box of someone close (legs below the frame) or crouched. */
+    wv_colour_slot *s = it->direct && it->slot >= 0 && r->view ? &r->view->colours[it->slot] : NULL;
+    const float *nb = NULL;
     if (it->direct && k->has_node_box && !strcmp(k->node_id, r->w->node) && cc->image_w > 0 &&
         cc->image_h > 0 && k->node_box[2] > 0 && k->node_box[3] > 0 &&
         k->node_box[0] + k->node_box[2] <= cc->image_w * 1.05f &&
         k->node_box[1] + k->node_box[3] <= cc->image_h * 1.05f) {
+        nb = k->node_box;
+        if (s) {
+            s->own_ms = r->now;
+            memcpy(s->own_box, nb, sizeof s->own_box);
+        }
+    } else if (s && it->held && s->own_ms && r->now - s->own_ms <= WV_SEEN_HOLD_MS + 100) {
+        nb = s->own_box;
+    }
+    if (nb) {
         float sx = (float)r->vp.w / (float)cc->image_w, sy = (float)r->vp.h / (float)cc->image_h;
-        *x = r->vp.x + (int)lroundf(k->node_box[0] * sx);
-        *y = r->vp.y + (int)lroundf(k->node_box[1] * sy);
-        *w = (int)lroundf(k->node_box[2] * sx);
-        *h = (int)lroundf(k->node_box[3] * sy);
+        *x = r->vp.x + (int)lroundf(nb[0] * sx);
+        *y = r->vp.y + (int)lroundf(nb[1] * sy);
+        *w = (int)lroundf(nb[2] * sx);
+        *h = (int)lroundf(nb[3] * sy);
     } else if (it->has_proj) {
         *x = to_sx(r, it->p.box_x);
         *y = to_sy(r, it->p.box_y);
@@ -722,9 +745,13 @@ static int draw_skeleton(rc *r, const wv_item *it, const seeker_track *k, uint32
     }
     if (nb == 0)
         return 0;
+    r->skel_y0 = 1000000, r->skel_y1 = -1000000;
     for (int j = 0; j < SEEKER_N_JOINTS; j++)
-        if (ok[j])
+        if (ok[j]) {
             draw_diamond(r->c, sx[j], sy[j], 2 + r->ts, 1, col);
+            r->skel_y0 = sy[j] < r->skel_y0 ? sy[j] : r->skel_y0;
+            r->skel_y1 = sy[j] > r->skel_y1 ? sy[j] : r->skel_y1;
+        }
     return nb;
 }
 
@@ -760,9 +787,11 @@ static void draw_in_view(rc *r, const wv_item *it, const seeker_track *k)
     int cx = x + w / 2, gap = 6 + 2 * r->ts;
     int tag_h = 7 * r->ts, rng_h = 7 * (r->ts + 1);
     uint32_t col = it->direct ? direct_colour(r, it, k) : xray_colour(r, k);
+    int *d = NULL;
     if (r->n_drawn < SEEKER_MAX_TRACKS) {
-        int *d = &r->drawn[r->n_drawn++][0];
+        d = &r->drawn[r->n_drawn++][0];
         d[0] = k->id, d[1] = it->direct, d[2] = x, d[3] = y, d[4] = w, d[5] = h, d[6] = it->level;
+        d[7] = d[8] = 0;
     }
     if (it->direct) {
         draw_rect(r->c, x, y, w, h, r->lw + 1, col);
@@ -774,6 +803,8 @@ static void draw_in_view(rc *r, const wv_item *it, const seeker_track *k)
         if (draw_skeleton(r, it, k, col) > 0) {
             dashed_rect(r->c, x, y, w, h, 1, 14, col); /* faint hull around the ghost */
             r->n_skel++;
+            if (d)
+                d[7] = r->skel_y0, d[8] = r->skel_y1;
         } else {
             dashed_rect(r->c, x, y, w, h, r->lw + 1, 10, col);
             draw_diamond(r->c, cx, y + h / 2, 6 + 3 * r->ts, r->lw, col);
@@ -1239,6 +1270,15 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
                 nb++;
             }
         }
+        if (nb > 0 && pass) {
+            r->skel_y0 = 1000000, r->skel_y1 = -1000000;
+            for (int j = 0; j < SEEKER_N_JOINTS; j++)
+                if (ok[j]) {
+                    int row = (int)lroundf(sy[j]);
+                    r->skel_y0 = row < r->skel_y0 ? row : r->skel_y0;
+                    r->skel_y1 = row > r->skel_y1 ? row : r->skel_y1;
+                }
+        }
         if (nb > 0) {
             float hr = tall * 0.055f, hy = sy[0] - tall * 0.015f, hw = 3 * r->u + (pass ? 0 : P_HALO_W * r->u);
             if (ok[0])
@@ -1438,10 +1478,12 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 continue;
             int raw[4];
             p_box(r, it, k, box[i], raw);
+            int *d = NULL;
             if (r->n_drawn < SEEKER_MAX_TRACKS) {
-                int *d = &r->drawn[r->n_drawn++][0];
+                d = &r->drawn[r->n_drawn++][0];
                 d[0] = k->id, d[1] = it->direct, d[2] = raw[0], d[3] = raw[1], d[4] = raw[2], d[5] = raw[3],
                 d[6] = it->level;
+                d[7] = d[8] = 0;
             }
             r->n_posture[k->posture >= 0 && k->posture <= SEEKER_POSTURE_DOWN ? k->posture : 0]++;
             /* Marks: people behind walls first, then seen people over them. A change of look
@@ -1477,7 +1519,10 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 r->n_fading++;
             }
             draw_set_dash_phase(r->pfx.march);
+            int skel_was = r->n_skel;
             p_marks(r, it, k, box[i]);
+            if (d && r->n_skel > skel_was)
+                d[7] = r->skel_y0, d[8] = r->skel_y1;
             if (!it->direct && it->slot >= 0 && r->view) {
                 wv_colour_slot *gs = &r->view->colours[it->slot];
                 gs->ghost_valid = 1;
@@ -1600,6 +1645,8 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
         s->drawn[i].w = r->drawn[i][4];
         s->drawn[i].h = r->drawn[i][5];
         s->drawn[i].level = r->drawn[i][6];
+        s->drawn[i].skel_y0 = r->drawn[i][7];
+        s->drawn[i].skel_y1 = r->drawn[i][8];
     }
 }
 
@@ -1689,6 +1736,7 @@ void wv_render(canvas *c, const seeker_config *cfg, wv_view *v, const seeker_tra
     if (w->pitch_auto && use_video)
         learn_tilt(v, &r.cam, t, items, n);
     int64_t now = v->clock_ms ? v->clock_ms : seeker_now_ms(); /* the frame's one timestamp */
+    r.now = now;
     assign_levels(v, cfg, t, items, n, now);
     if (r.plan) {
         anim_person_begin(now, r.u);
@@ -1809,5 +1857,7 @@ void wv_render(canvas *c, const seeker_config *cfg, wv_view *v, const seeker_tra
         s->drawn[i].w = r.drawn[i][4];
         s->drawn[i].h = r.drawn[i][5];
         s->drawn[i].level = r.drawn[i][6];
+        s->drawn[i].skel_y0 = r.drawn[i][7];
+        s->drawn[i].skel_y1 = r.drawn[i][8];
     }
 }

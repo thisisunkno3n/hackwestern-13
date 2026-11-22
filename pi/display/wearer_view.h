@@ -91,6 +91,8 @@ typedef struct {
     seeker_colour c;  /* range from the wearer, with hysteresis (seeker_colour.h) */
     int box_valid;    /* eased screen box (WV_BOX_EASE), snapped on a jump */
     float bx, by, bw, bh;
+    int64_t own_ms;   /* when the wearer's phone last sent its own box of them (0: never), */
+    float own_box[4]; /* and that box, image px: drawn through the SEEN hold (item_box) */
     int shown;        /* drawn before: a change of look crossfades */
     int shown_direct; /* drawn as seen (with the WV_SEEN_HOLD_MS hold) */
     int64_t direct_ms, xfade_ms; /* last frame the wearer's phone saw them; start of the crossfade */
@@ -107,6 +109,10 @@ typedef struct {
  * (x-ray ghost to seen box or back) crossfades over WV_XFADE_MS in the plan theme, both drawn in
  * the same eased box. */
 #define WV_SEEN_HOLD_MS 400
+/* pitch_auto learns only from a box this tall against the projected standing person (the
+ * landmark box, eyes to ankles, is about 0.9 of it). */
+#define WV_TILT_BOX_MIN 0.78f
+#define WV_TILT_BOX_MAX 1.15f
 #define WV_XFADE_MS 250
 
 /* Drawn boxes move this fraction of the way to the new box each frame (30 fps: about 50 ms of
@@ -129,6 +135,8 @@ typedef struct {
     int n_fading;     /* crossfading between x-ray and seen */
     struct {
         int id, direct, x, y, w, h, level;
+        int skel_y0, skel_y1; /* canvas rows of the ghost skeleton's highest and lowest drawn
+                               * joint (both 0: no skeleton drawn for this person) */
     } drawn[SEEKER_MAX_TRACKS];
     float video_ms;   /* copying the picture into the canvas (and dimming it), this frame */
     float pitch_deg;  /* the camera tilt the x-ray projection used this frame (all terms) */

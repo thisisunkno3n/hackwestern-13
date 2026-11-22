@@ -106,11 +106,14 @@ typedef struct {
     long crouch_ranges;    /* contacts ranged with the crouch height (logs, tests) */
     /* Occlusion guard (SEEKER_OCCL_*): */
     unsigned char part[SEEKER_MAX_CONTACTS]; /* last message's contacts: 1 shows part of a body,
-                                              * 2 whole but held partial, 4 near frag_bearing */
+                                              * 2 whole but held partial, 4 near frag_bearing,
+                                              * SEEKER_PART_CUT a part only because of the frame */
     int64_t frag_ms;       /* when this node last saw part of someone, at frag_bearing */
     float frag_bearing;
     int frag_whole;        /* whole sightings near frag_bearing since then */
     long frag_held;        /* whole sightings taken as partial (logs, tests) */
+    long cut_n;            /* partial contacts kept as seen, cut by the frame (logs, tests) */
+    int64_t part_log_ms;   /* last "part:" log line */
 } seeker_fusion_node;
 
 /* Crouch height model. phone.html ranges from the eye (or nose) to mid-ankle height over
@@ -248,6 +251,15 @@ typedef struct {
  *   - The wearer's lone partial sighting continues a track on its bearing at the distance of the
  *     track's last fix, not one moved on by its velocity: no walking on into the wall. */
 #define SEEKER_OCCL_HOLD_MS 1000
+/* Someone standing close to a phone has their legs below its frame, and the pose model's hip
+ * visibility dips under 0.5 now and then: a partial contact by the rule above, though
+ * nothing hides them. Such a contact (head and both shoulders seen, both ankles placed at
+ * SEEKER_PART_CUT_ROW of the frame height or lower) is still ranged by bearing only, but its phone
+ * stays one of the track's nodes (so the wearer's own box is drawn, SEEN) and it does not start
+ * the hold above: with it, every dip made the next two whole sightings partial too, and a person
+ * in plain view of the wearer was drawn as an x-ray ghost in a floor-to-head hull for good. */
+#define SEEKER_PART_CUT 8
+#define SEEKER_PART_CUT_ROW 0.98f
 #define SEEKER_OCCL_BEARING_DEG 8.0f
 #define SEEKER_OCCL_WHOLE_N 3
 #define SEEKER_OCCL_FRAG_VIS 0.5f

@@ -637,6 +637,45 @@ grep -c 'occl: whole sighting' ~/seeker-logs/hud_fusion.log
 
 `FUSION_ARGS=--no-occl-guard sh scripts/run-live.sh` is the old behaviour, to compare.
 
+## Sizes: someone close to R1 keeps R1's own box
+
+What is right: a SEEN box is R1's own detection box; an x-ray hull is a standing person from the
+floor to the top of the head at their distance from R1 (`f * 1.75 / distance`,
+`f = (width / 2) / tan(hfov / 2)`), and the ghost skeleton is scaled by that height. Host check:
+`build/test_size` (ctest `size`): 2, 3 and 5 m, in view and behind the wall, config defaults and
+`run-live.sh` defaults, landscape and portrait, each within 10 percent.
+
+What went wrong (boxes and ghosts far too big for someone standing in front of R1): within about
+2.7 m of R1 the frame cuts a standing person's legs, and the pose model's hip visibility dips
+under 0.5 in some frames. Fusion reads such a frame as "part of a body", and the
+occlusion guard then held the next two whole sightings partial too, so R1 never counted as seeing
+them: they were drawn as an x-ray person, a floor-to-head hull and R2's ghost over someone in plain
+view (host replay: SEEN in 0 of 31 frames, hull 1.47 times R1's box). With the guard off the look
+stayed SEEN but the box was the projected one in 25 of 31 frames. Now:
+
+- Fusion (`SEEKER_PART_CUT`): a partial contact with the head and both shoulders seen and both
+  ankles placed at the bottom edge of the frame or below is cut by the frame, not hidden. It is
+  still ranged by bearing only, but R1 stays one of the track's phones (SEEN, R1's box) and it
+  does not start the occlusion hold.
+- HUD: through the 400 ms SEEN hold the last box R1 itself sent stays, instead of the projected
+  floor-to-head box (which is far bigger than the box of someone close or crouched).
+- `PITCH_AUTO` learns only from a whole standing person (box 0.78 to 1.15 of the projected height,
+  posture not crouch or down): a cut or crouched person taught it up to 6 deg of tilt, which drew
+  the people behind the wall up to 13 percent too tall and off their spot.
+
+Log to check live, at most one line per phone every 5 s while it sends a part of someone:
+
+```sh
+grep 'part:' ~/seeker-logs/hud_fusion.log | tail -20
+```
+
+`NODE R1 part: R1-p1 at 2.1 deg is cut by the frame: still seen by this phone ...` is the new
+case. `... shows part of a body: ranged by bearing, not one of the track's phones while another
+sees them whole (head, shoulders, hips, ankles visibility, ankle rows)` for a person standing in
+the open means the rule missed them: the numbers say why (ankle rows under 0.98: the pose model
+placed the hidden feet inside the frame; a shoulder under 0.5). `FUSION_ARGS=--no-occl-guard`
+turns the hold off, to compare.
+
 ## Morrissette calibration (tag 0 only, both phones fixed)
 
 Tag 7 is not needed: `R2_MODE` defaults to `pin` and `WEARER_MODE=fixed` pins R1, both from
@@ -958,7 +997,7 @@ or come closer. `--no-pose-flip` in `FUSION_ARGS` turns the catch off (the jump 
 | `R1_CAM_H` | `1.30` | R1's camera height above the floor, m (handheld at chest height) | the x-ray people sit too low (lower it) or too high |
 | `R1_PITCH` | `0` | R1's tilt, deg, up positive (the phone's `pitch_deg` wins when it sends one) | it is held tilted |
 | `XRAY_UP` | `0` | nudge, deg: positive draws the x-ray people higher | a last fix on stage |
-| `PITCH_AUTO` | `1` | learns R1's tilt from people R1 sees whole (its own box vs the projection) | turn off if a half-hidden person keeps dragging it |
+| `PITCH_AUTO` | `1` | learns R1's tilt from people R1 sees whole and standing (its own box vs the projection) | turn off if a half-hidden person keeps dragging it |
 | `R2_CAM_H`, `R2_PITCH` | `1.27`, `0` | R2's camera height and tilt: `hud_fusion.log` logs `range check: box height X m, ground plane Y m` | the two disagree: trust the ground plane when R2 is level |
 | `GROUND_RANGE` | `0` | `1` averages R2's ground-plane range into its ranges | the range check shows the box height is off and R2 is level |
 | `R2_POSE` | measure | R2's x,y,yaw (see "Where R2 is"). `sh scripts/calibrate.sh yaw R2` fills in the yaw from tag 0, keeping the measured x,y | R2's people are rotated around R2 |

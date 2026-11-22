@@ -181,6 +181,7 @@ int seeker_fusion_set_hfov(seeker_fusion *f, const char *id, const char *spec)
 /* --hfov: rescale the bearings the phone computed with its own FOV to the real one. */
 static float contact_ground_range(const seeker_fusion_node *n, const seeker_contact *c);
 static int contact_partial(const seeker_contact *c, int w, int h);
+static int contact_frame_cut(const seeker_contact *c);
 
 /* The phone's bearings and box-height ranges with its real FOV (--hfov), the real people's
  * height (--person-h, phone.html assumes SEEKER_SKEL_PERSON_M) and a per-phone factor
@@ -650,14 +651,16 @@ static void mark_partial(seeker_fusion *f, seeker_fusion_node *n, int64_t now_ms
     for (int i = 0; i < n->last.n; i++) {
         const seeker_contact *c = &n->last.c[i];
         int part = f->handoff && contact_partial(c, n->image_w, n->image_h);
+        /* SEEKER_PART_CUT: the frame cuts them, no wall does. The node sees this person. */
+        int cut = part && contact_frame_cut(c);
         if (f->handoff && f->occl_guard) {
             int near = n->frag_ms && now_ms - n->frag_ms <= SEEKER_OCCL_HOLD_MS &&
                        fabsf(seeker_wrap180(c->bearing_deg - n->frag_bearing)) <= SEEKER_OCCL_BEARING_DEG;
-            if (part) {
+            if (part && !cut) {
                 n->frag_ms = now_ms;
                 n->frag_bearing = c->bearing_deg;
                 n->frag_whole = 0;
-            } else if (near && ++n->frag_whole < SEEKER_OCCL_WHOLE_N) {
+            } else if (!part && near && ++n->frag_whole < SEEKER_OCCL_WHOLE_N) {
                 part = 2;
                 if (n->frag_whole == 1)
                     seeker_log("NODE %s occl: whole sighting %s at %.1f deg held partial, part of someone "
@@ -667,7 +670,21 @@ static void mark_partial(seeker_fusion *f, seeker_fusion_node *n, int64_t now_ms
             }
             part |= near || part ? 4 : 0;
         }
-        n->part[i] = (unsigned char)part;
+        n->part[i] = (unsigned char)(part | (cut ? SEEKER_PART_CUT : 0));
+        n->cut_n += cut;
+        if ((part & 3) && (!n->part_log_ms || now_ms - n->part_log_ms >= 5000)) {
+            /* Why a person in a phone's view is not one it "sees": the numbers the rules read. */
+            const float(*p)[3] = c->pts;
+            n->part_log_ms = now_ms;
+            seeker_log("NODE %s part: %s at %.1f deg %s (head %.2f, shoulders %.2f %.2f, hips %.2f %.2f, "
+                       "ankles %.2f %.2f at rows %.2f %.2f; %ld cut by the frame so far)",
+                       n->id, c->id, c->bearing_deg,
+                       cut ? "is cut by the frame: still seen by this phone, ranged by bearing"
+                       : part & 2 ? "is whole but held as part of a body (occlusion guard)"
+                                  : "shows part of a body: ranged by bearing, not one of the track's phones while another sees them whole",
+                       fmaxf(p[0][2], fmaxf(p[1][2], p[2][2])), p[5][2], p[6][2], p[11][2], p[12][2],
+                       p[15][2], p[16][2], p[15][1], p[16][1], n->cut_n);
+        }
     }
 }
 
@@ -958,6 +975,18 @@ static int contact_partial(const seeker_contact *c, int w, int h)
     return 1;
 }
 
+/* SEEKER_PART_CUT: a partial contact that is an upper body the bottom of the frame cuts: the head
+ * and both shoulders seen, both ankles placed at the bottom edge or below it. Nothing hides this
+ * person from the phone, they stand too close for its frame (within about 2.7 m of a landscape
+ * phone at chest height). Their size range is still that of a part (the box of what shows). */
+static int contact_frame_cut(const seeker_contact *c)
+{
+    const float(*p)[3] = c->pts;
+    const float v = 0.5f;
+    return c->has_pts && (p[0][2] > v || p[1][2] > v || p[2][2] > v) && p[5][2] > v && p[6][2] > v &&
+           p[15][1] >= SEEKER_PART_CUT_ROW && p[16][1] >= SEEKER_PART_CUT_ROW;
+}
+
 static const char *wearer_id(const seeker_config *cfg)
 {
     return cfg->wearer_node[0] ? cfg->wearer_node : cfg->view_node;
@@ -990,7 +1019,10 @@ static int place_cluster(const seeker_fusion *f, const seeker_tri_cluster *cl, c
     *wearer_part = 0;
     for (int m = 0; m < cl->n; m++) {
         const seeker_fusion_node *mn = &f->nodes[ray_node[cl->member[m]]];
-        int part = whole > 0 && rays[cl->member[m]].partial;
+        /* Not one of the track's nodes: a view of part of them while another sees them whole,
+         * unless it is only the frame that cuts them (SEEKER_PART_CUT: that phone sees them). */
+        int part = whole > 0 && rays[cl->member[m]].partial &&
+                   !(mn->part[ray_idx[cl->member[m]]] & SEEKER_PART_CUT);
         if (!part) {
             ids[nid++] = mn->id;
             *mask |= 1u << ray_node[cl->member[m]];

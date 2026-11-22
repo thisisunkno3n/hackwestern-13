@@ -160,6 +160,14 @@ target_include_directories(test_occlusion PRIVATE display)
 target_link_libraries(test_occlusion seeker_fusion_core seeker_video seeker_draw)
 target_compile_definitions(test_occlusion PRIVATE SEEKER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_test(NAME occlusion COMMAND test_occlusion WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+# Drawn sizes (tests/test_size.c): SEEN box and x-ray hull and skeleton of a standing person at 2,
+# 3 and 5 m against the pinhole size, config defaults and run-live.sh's knobs, and the live cases
+# (legs cut by the frame, pitch-auto) the sizes went wrong in.
+add_executable(test_size tests/test_size.c display/projection.c display/wearer_view.c)
+target_include_directories(test_size PRIVATE display)
+target_link_libraries(test_size seeker_fusion_core seeker_video seeker_draw)
+target_compile_definitions(test_size PRIVATE SEEKER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME size COMMAND test_size WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(test_supervisor tests/test_supervisor.c)
 target_link_libraries(test_supervisor seeker_sv)
 add_test(NAME supervisor_unit COMMAND test_supervisor)
