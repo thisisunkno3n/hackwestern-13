@@ -428,7 +428,7 @@ int main(int argc, char **argv)
                          video_rx_state(vf, vrx ? &vs : NULL, t0), vrx ? vs.fps : 0,
                          eagle ? &wearer : NULL, video_rx_why(vf, vrx ? &vs : NULL, t0),
                          video_rx_frozen(vf, vrx ? &vs : NULL, t0, VIDEO_FREEZE_MS),
-                         lat_show ? lat_txt : NULL };
+                         lat_show ? lat_txt : NULL, t0 /* now_ms: the plan animations' frame time */ };
         if (st.video_why != video_why && t0 - video_why_ms >= 1000) {
             if (st.video_why == VIDEO_WHY_OK)
                 seeker_log("video: ok, %s picture on the HUD", vf->node_id);

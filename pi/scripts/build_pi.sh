@@ -62,7 +62,7 @@ fusion/seeker_assign.c fusion/seeker_skel.c"
 VIDEO="display/video_proto.c display/video_decode.c display/video_rx.c display/latency.c"
 # Plan theme: drafting primitives, Atkinson Hyperlegible compiled in (third_party/atkinson, made by
 # tools/gen_hud_fonts.py) and drawn with stb_truetype.
-DRAW="display/draw.c display/draw_font.c display/plan.c third_party/atkinson/hud_fonts.c"
+DRAW="display/draw.c display/draw_font.c display/plan.c display/anim_alert.c third_party/atkinson/hud_fonts.c"
 
 echo "CC=$CC  target=$(uname -s)  out=$OUT/"
 set -x

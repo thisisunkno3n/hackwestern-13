@@ -1,5 +1,6 @@
 #include "hud_render.h"
 #include "plan.h"
+#include "anim_alert.h"
 #include "seeker_time.h"
 
 #include <math.h>
@@ -491,10 +492,10 @@ static void plan_banners(ctx *x, float u, int wv_radar, int eagle_view)
                              frozen     ? "Video lost, last picture shown"
                              : wv_radar ? "Camera paused, showing plan"
                                         : "No camera picture",
-                             plan_video_why(st->video_why), P_INK, P_INK) + gap;
+                             plan_video_why(st->video_why), P_ALERT, P_INK) + gap;
     }
     if (x->stale)
-        y += plan_banner(x->c, u, y, "Fusion lost", "no tracks for over half a second", P_RED, P_RED) + gap;
+        y += plan_banner(x->c, u, y, "Fusion lost", "no tracks for over half a second", P_ALERT, P_ALERT) + gap;
     for (int i = 0; t && i < t->n_nodes; i++) {
         if (strcmp(t->nodes[i].state, "lost") != 0)
             continue;
@@ -502,7 +503,7 @@ static void plan_banners(ctx *x, float u, int wv_radar, int eagle_view)
             continue; /* the wearer view says it itself */
         char s[32];
         snprintf(s, sizeof s, "%s lost", t->nodes[i].node_id);
-        y += plan_banner(x->c, u, y, s, "", P_RED, P_RED) + gap;
+        y += plan_banner(x->c, u, y, s, "", P_ALERT, P_ALERT) + gap;
     }
 }
 
@@ -511,6 +512,7 @@ int hud_render(canvas *c, const seeker_config *cfg, const hud_state *st)
     ctx x = { c, cfg, st, c->h >= 600 ? 2 : 1, cfg->line_px > 0 ? cfg->line_px : 2, 0 };
     x.stale = !st->t || st->tracks_age_ms > FUSION_STALE_MS;
     int drawn = 0;
+    anim_alert_frame(st->now_ms); /* the one frame time every plan animation runs on */
 
     int shown = VIDEO_SHOWN(st->video_state);
     /* EagleEye only: a brief stall keeps the last picture (dark) instead of flipping to radar. */
@@ -538,6 +540,7 @@ int hud_render(canvas *c, const seeker_config *cfg, const hud_state *st)
             plan_full(&x, u, !strcmp(st->background, "wearer") ? "Camera paused" : "Plan view");
         }
         plan_banners(&x, u, wv_radar, eagle_view);
+        anim_alert_warn_flush(c, u); /* warning plates sliding out */
         return drawn;
     }
     if (!strcmp(st->background, "wearer") && st->wearer && !wv_radar) {

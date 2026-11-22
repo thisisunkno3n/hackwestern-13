@@ -1,4 +1,5 @@
 #include "plan.h"
+#include "anim_alert.h"
 #include "video_rx.h"
 
 #include <math.h>
@@ -16,6 +17,91 @@ float plan_u(const canvas *c)
 static int S(float u, float v) /* design px to frame px */
 {
     return (int)lroundf(v * u);
+}
+
+/* ---- person strokes with a halo ---- */
+
+static int halo_a(int alpha)
+{
+    return (P_HALO_A * (alpha > 255 ? 255 : alpha) + 127) / 255;
+}
+
+void plan_halo_line(canvas *c, float u, float x0, float y0, float x1, float y1, float width, int cap,
+                    int alpha)
+{
+    if (alpha <= 0)
+        return;
+    float e = P_HALO_W * u * 0.5f;
+    if (cap == DRAW_CAP_BUTT) { /* reach past each end as far as it does to the sides */
+        float dx = x1 - x0, dy = y1 - y0, L = sqrtf(dx * dx + dy * dy);
+        if (L > 1e-4f) {
+            dx = dx / L * e, dy = dy / L * e;
+            x0 -= dx, y0 -= dy, x1 += dx, y1 += dy;
+        }
+    }
+    draw_line_aa(c, x0, y0, x1, y1, width + 2 * e, cap, P_HALO, halo_a(alpha));
+}
+
+void plan_halo_dash(canvas *c, float u, float x0, float y0, float x1, float y1, float width,
+                    float dash, float gap, int alpha)
+{
+    float dx = x1 - x0, dy = y1 - y0, len = sqrtf(dx * dx + dy * dy);
+    if (len < 1e-4f || dash <= 0) {
+        plan_halo_line(c, u, x0, y0, x1, y1, width, DRAW_CAP_BUTT, alpha);
+        return;
+    }
+    if (gap < 0)
+        gap = 0;
+    float ux = dx / len, uy = dy / len;
+    for (float a = 0; a < len && a < 20000.0f; a += dash + gap) { /* draw_dashed_aa's dashes */
+        float b = a + dash < len ? a + dash : len;
+        plan_halo_line(c, u, x0 + ux * a, y0 + uy * a, x0 + ux * b, y0 + uy * b, width, DRAW_CAP_BUTT, alpha);
+    }
+}
+
+void plan_stroke(canvas *c, float u, float x0, float y0, float x1, float y1, float width, int cap,
+               uint32_t col, int alpha)
+{
+    plan_halo_line(c, u, x0, y0, x1, y1, width, cap, alpha);
+    draw_line_aa(c, x0, y0, x1, y1, width, cap, col, alpha);
+}
+
+void plan_dash(canvas *c, float u, float x0, float y0, float x1, float y1, float width, float dash,
+               float gap, uint32_t col, int alpha)
+{
+    plan_halo_dash(c, u, x0, y0, x1, y1, width, dash, gap, alpha);
+    draw_dashed_aa(c, x0, y0, x1, y1, width, dash, gap, DRAW_CAP_BUTT, col, alpha);
+}
+
+void plan_dash_rect(canvas *c, float u, float x, float y, float w, float h, float width, float dash,
+                    float gap, uint32_t col, int alpha)
+{
+    plan_halo_dash(c, u, x, y, x + w, y, width, dash, gap, alpha);
+    plan_halo_dash(c, u, x + w, y, x + w, y + h, width, dash, gap, alpha);
+    plan_halo_dash(c, u, x + w, y + h, x, y + h, width, dash, gap, alpha);
+    plan_halo_dash(c, u, x, y + h, x, y, width, dash, gap, alpha);
+    draw_dashed_rect(c, x, y, w, h, width, dash, gap, col, alpha);
+}
+
+void plan_square(canvas *c, float u, float cx, float cy, float s, uint32_t col, int alpha)
+{
+    float hs = s + P_HALO_W * u;
+    draw_fill_a(c, (int)lroundf(cx - hs / 2), (int)lroundf(cy - hs / 2), (int)lroundf(hs), (int)lroundf(hs),
+                P_HALO, halo_a(alpha));
+    draw_fill_a(c, (int)lroundf(cx - s / 2), (int)lroundf(cy - s / 2), (int)lroundf(s), (int)lroundf(s), col,
+                alpha);
+}
+
+void plan_halo_rect(canvas *c, float u, float x, float y, float w, float h, float cut, float ew,
+                    int alpha)
+{
+    if (alpha <= 0)
+        return;
+    draw_poly_style hs = { 0 };
+    hs.edge = P_HALO;
+    hs.edge_a = halo_a(alpha);
+    hs.edge_w = ew + P_HALO_W * u;
+    draw_cut_rect(c, x, y, w, h, cut, &hs);
 }
 
 /* ---- plate and leader ---- */
@@ -42,7 +128,7 @@ void plan_plate(canvas *c, float u, int x, int y, const plan_line *l, int n, uin
     st.fill = P_PLATE;
     st.fill_a = P_PLATE_A;
     if (red_hatch) {
-        st.hatch = P_RED;
+        st.hatch = P_ALERT;
         st.hatch_a = 71; /* 28% */
         st.hatch_gap = 9 * u;
         st.hatch_w = 2 * u;
@@ -50,6 +136,7 @@ void plan_plate(canvas *c, float u, int x, int y, const plan_line *l, int n, uin
     st.edge = edge;
     st.edge_a = 255;
     st.edge_w = 1.5f * u;
+    plan_halo_rect(c, u, (float)x, (float)y, (float)w, (float)h, 10 * u, st.edge_w, 255);
     draw_cut_rect(c, (float)x, (float)y, (float)w, (float)h, 10 * u, &st);
     int ty = y + S(u, 9);
     for (int i = 0; i < n; i++) {
@@ -64,14 +151,19 @@ void plan_leader(canvas *c, float u, float x0, float y0, float x1, float y1, uin
     float lw = 1.5f * u, dy = fabsf(y1 - y0), dx = fabsf(x1 - x0), sx = x1 >= x0 ? 1.0f : -1.0f;
     if (dy <= dx) { /* 45 degree run, then level */
         float kx = x0 + sx * dy;
+        plan_halo_line(c, u, x0, y0, kx, y1, lw, DRAW_CAP_SQUARE, 255);
+        plan_halo_line(c, u, kx, y1, x1, y1, lw, DRAW_CAP_SQUARE, 255);
         draw_line_aa(c, x0, y0, kx, y1, lw, DRAW_CAP_SQUARE, col, 255);
         draw_line_aa(c, kx, y1, x1, y1, lw, DRAW_CAP_SQUARE, col, 255);
     } else { /* too steep for one 45 degree run: straight down or up first */
         float ky = y1 + (y0 < y1 ? -dx : dx);
+        plan_halo_line(c, u, x0, y0, x0, ky, lw, DRAW_CAP_SQUARE, 255);
+        plan_halo_line(c, u, x0, ky, x1, y1, lw, DRAW_CAP_SQUARE, 255);
         draw_line_aa(c, x0, y0, x0, ky, lw, DRAW_CAP_SQUARE, col, 255);
         draw_line_aa(c, x0, ky, x1, y1, lw, DRAW_CAP_SQUARE, col, 255);
     }
-    int s = S(u, 6);
+    int s = S(u, 6), hs = s + S(u, P_HALO_W);
+    draw_fill_a(c, (int)lroundf(x0) - hs / 2, (int)lroundf(y0) - hs / 2, hs, hs, P_HALO, P_HALO_A);
     draw_fill_a(c, (int)lroundf(x0) - s / 2, (int)lroundf(y0) - s / 2, s, s, col, 255);
 }
 
@@ -134,13 +226,14 @@ int plan_title_block(canvas *c, float u, const char *camera, int camera_late,
     st.fill = P_PLATE;
     st.fill_a = P_PLATE_A;
     draw_cut_rect(c, (float)x0, (float)y, (float)total, (float)h, 12 * u, &st);
-    if (camera_late) {
+    float hsw, hk;
+    if (anim_alert_late(camera_late, &hsw, &hk)) {
         draw_poly_style hs = { 0 };
-        hs.hatch = P_RED;
+        hs.hatch = P_ALERT;
         hs.hatch_a = 77; /* 30% */
         hs.hatch_gap = 9 * u;
         hs.hatch_w = 2 * u;
-        draw_cut_rect(c, (float)x0, (float)y, (float)ws[0], (float)h, 0, &hs);
+        anim_alert_hatch_rect(c, (float)x0, (float)y, (float)ws[0], (float)h, 0, &hs, hsw, hk);
     }
     draw_poly_style es = { 0 };
     es.edge = P_INK;
@@ -152,8 +245,8 @@ int plan_title_block(canvas *c, float u, const char *camera, int camera_late,
         if (i)
             draw_line_aa(c, (float)x, (float)y, (float)x, (float)(y + h), 1.0f * u, DRAW_CAP_BUTT, P_INK, 56);
         draw_ui_text_top(c, x + pad, y + S(u, 8), kpx, DRAW_FONT_SANS_MEDIUM, P_INK, P_INK2_A, keys[i]);
-        draw_ui_text_top(c, x + pad, y + S(u, 27), vpx, DRAW_FONT_MONO, i == 0 && camera_late ? P_RED : P_INK,
-                         255, vals[i]);
+        anim_alert_cell(c, i, x + pad, y + S(u, 27), vpx, i == 0 && camera_late ? P_ALERT : P_INK, vals[i], x, y,
+                        ws[i], h);
         x += ws[i];
     }
     return total;
@@ -283,21 +376,20 @@ void plan_map(canvas *c, float u, int x, int y, int w, int h, float ppm, float w
         to_map(&g, m->x, m->y, &px, &py);
         if (m->kind == PLAN_RAY) {
             float a = (m->ray_deg - wearer->yaw_deg) * DEG2RAD;
-            draw_dashed_aa(&v, px, py, px + far * sinf(a), py - far * cosf(a), 1.5f * u, 6 * u, 5 * u,
-                           DRAW_CAP_BUTT, P_HIDDEN, 200);
+            plan_dash(&v, u, px, py, px + far * sinf(a), py - far * cosf(a), 1.5f * u, 6 * u, 5 * u, P_HIDDEN, 200);
             continue;
         }
         px = clampf(px, 7 * u, (float)cw - 7 * u);
         py = clampf(py, 7 * u, (float)ch - 7 * u);
         float s = 10 * u;
         if (m->kind == PLAN_SEEN)
-            draw_fill_a(&v, (int)lroundf(px - s / 2), (int)lroundf(py - s / 2), (int)lroundf(s), (int)lroundf(s),
-                        m->close ? P_RED : P_INK, 255);
+            plan_square(&v, u, px, py, s, m->close ? P_ALERT : P_SEEN, 255);
         else
-            draw_dashed_rect(&v, px - s / 2, py - s / 2, s, s, 2 * u, 3 * u, 2 * u, m->close ? P_RED : P_HIDDEN, 255);
+            plan_dash_rect(&v, u, px - s / 2, py - s / 2, s, s, 2 * u, 3 * u, 2 * u, m->close ? P_ALERT : P_HIDDEN,
+                           255);
         if (m->label[0])
             draw_ui_text_top(&v, (int)lroundf(px + 10 * u), (int)lroundf(py - 9 * u), S(u, 13), DRAW_FONT_MONO,
-                             m->close ? P_RED : m->kind == PLAN_SEEN ? P_INK : P_HIDDEN, 255, m->label);
+                             m->close ? P_ALERT : m->kind == PLAN_SEEN ? P_SEEN : P_HIDDEN, 255, m->label);
     }
     /* The wearer: a filled triangle pointing ahead, with its id. */
     float tri[6] = { g.ax, g.ay - 9 * u, g.ax + 7 * u, g.ay + 6 * u, g.ax - 7 * u, g.ay + 6 * u };
@@ -318,7 +410,7 @@ int plan_banner(canvas *c, float u, int y, const char *title, const char *value,
                        { value, DRAW_FONT_MONO, 15, P_INK, P_INK2_A } };
     int n = value && value[0] ? 2 : 1, w, h;
     plan_plate_size(u, l, n, &w, &h);
-    plan_plate(c, u, (c->w - w) / 2, y, l, n, edge, 0);
+    anim_alert_warn(c, u, (c->w - w) / 2, y, l, n, edge);
     return h;
 }
 

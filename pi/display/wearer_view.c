@@ -1,4 +1,5 @@
 #include "wearer_view.h"
+#include "anim_alert.h"
 #include "plan.h"
 #include "seeker_json.h"
 #include "seeker_time.h"
@@ -418,6 +419,7 @@ typedef struct {
     float u;        /* plan: frame height / 720 */
     float fade_a;   /* plan marks: alpha factor (crossfade) */
     int n_fading;
+    anim_fx fx;     /* plan: this person's alert animation (anim_alert.h), zero = none */
 } rc;
 
 static int clampi(int v, int lo, int hi)
@@ -1069,7 +1071,7 @@ static void p_tag(rc *r, int bx, int by, int bw, float lead_dy, float dx, float 
         float ly = (float)clampi(by + P(r, lead_dy), 0, H - 1);
         plan_leader(r->c, r->u, lx, ly, (float)(right ? px : px + pw), (float)(py + P(r, 14)), col);
     }
-    plan_plate(r->c, r->u, px, py, l, n, col, red_hatch);
+    anim_alert_plate(r->c, r->u, px, py, l, n, col, red_hatch, &r->fx);
 }
 
 /* The box a person is drawn in this frame: item_box, eased like classic (WV_BOX_EASE), and cut
@@ -1131,22 +1133,26 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
     int x = b[0], y = b[1], w = b[2], h = b[3];
     int st = p_stale(r, k);
     if (it->direct) {
-        uint32_t col = p_alarm(r, it, k) ? P_RED : P_INK;
-        int a = (int)((st ? 115 : 255) * r->fade_a);
+        uint32_t col = anim_alert_tint(&r->fx, p_alarm(r, it, k) ? P_ALERT : P_SEEN);
+        int a = anim_alert_alpha(&r->fx, (int)((st ? 115 : 255) * r->fade_a));
         draw_poly_style fs = { 0 };
         fs.edge = col;
         fs.edge_a = a;
         fs.edge_w = 2.0f * r->u;
-        draw_cut_rect(r->c, (float)x, (float)y, (float)w, (float)h, 0, &fs);
         float my = y + h * 0.5f, t8 = 8 * r->u;
+        plan_halo_rect(r->c, r->u, (float)x, (float)y, (float)w, (float)h, 0, fs.edge_w, a);
+        plan_halo_line(r->c, r->u, x - t8, my, x + t8, my, 2 * r->u, DRAW_CAP_BUTT, a);
+        plan_halo_line(r->c, r->u, x + w - t8, my, x + w + t8, my, 2 * r->u, DRAW_CAP_BUTT, a);
+        draw_cut_rect(r->c, (float)x, (float)y, (float)w, (float)h, 0, &fs);
         draw_line_aa(r->c, x - t8, my, x + t8, my, 2 * r->u, DRAW_CAP_BUTT, col, a);
         draw_line_aa(r->c, x + w - t8, my, x + w + t8, my, 2 * r->u, DRAW_CAP_BUTT, col, a);
+        anim_alert_ring(r->c, r->u, &r->fx, (float)x, (float)y, (float)w, (float)h);
         return;
     }
     int a = (int)((st ? 120 : 255) * r->fade_a);
     if (it->has_ray_span)
-        draw_dashed_aa(r->c, (float)to_sx(r, it->ray_u0), (float)to_sy(r, it->ray_v0), (float)to_sx(r, it->ray_u1),
-                       (float)to_sy(r, it->ray_v1), 2 * r->u, 10 * r->u, 7 * r->u, DRAW_CAP_BUTT, P_HIDDEN, a * 7 / 10);
+        plan_dash(r->c, r->u, (float)to_sx(r, it->ray_u0), (float)to_sy(r, it->ray_v0), (float)to_sx(r, it->ray_u1),
+                  (float)to_sy(r, it->ray_v1), 2 * r->u, 10 * r->u, 7 * r->u, P_HIDDEN, a * 7 / 10);
     /* Skeleton joints first (classic's placement: hip row by posture, a person down lifted to the
      * bottom of the view), so the hull can follow a lying ghost. */
     float sx[SEEKER_N_JOINTS], sy[SEEKER_N_JOINTS], tall = 0;
@@ -1187,31 +1193,41 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
     hs.hatch_gap = 12 * r->u;
     hs.hatch_w = 2 * r->u;
     draw_cut_rect(r->c, (float)x, (float)y, (float)w, (float)h, 0, &hs);
-    draw_dashed_rect(r->c, (float)x, (float)y, (float)w, (float)h, 1.5f * r->u, 10 * r->u, 7 * r->u, P_HIDDEN,
-                     a * 55 / 100);
+    plan_dash_rect(r->c, r->u, (float)x, (float)y, (float)w, (float)h, 1.5f * r->u, 10 * r->u, 7 * r->u, P_HIDDEN,
+                   a * 55 / 100);
+    anim_alert_hull(r->c, r->u, &r->fx, (float)x, (float)y, (float)w, (float)h);
     int nb = 0;
-    if (have) {
+    /* Two passes: every halo first, then the colour, so one bone's halo never cuts another bone. */
+    for (int pass = 0; have && pass < 2; pass++) {
+        nb = 0;
         for (size_t bi = 0; bi < sizeof P_BONES / sizeof P_BONES[0]; bi++) {
             int ja = P_BONES[bi][0], jb = P_BONES[bi][1];
             if (ok[ja] && ok[jb]) {
-                draw_dashed_aa(r->c, sx[ja], sy[ja], sx[jb], sy[jb], 3 * r->u, 11 * r->u, 7 * r->u, DRAW_CAP_BUTT,
-                               P_HIDDEN, a);
+                if (pass)
+                    draw_dashed_aa(r->c, sx[ja], sy[ja], sx[jb], sy[jb], 3 * r->u, 11 * r->u, 7 * r->u, DRAW_CAP_BUTT,
+                                   P_HIDDEN, a);
+                else
+                    plan_halo_dash(r->c, r->u, sx[ja], sy[ja], sx[jb], sy[jb], 3 * r->u, 11 * r->u, 7 * r->u, a);
                 nb++;
             }
         }
         if (nb > 0) {
+            float hr = tall * 0.055f, hy = sy[0] - tall * 0.015f, hw = 3 * r->u + (pass ? 0 : P_HALO_W * r->u);
             if (ok[0])
-                draw_circle_aa(r->c, sx[0], sy[0] - tall * 0.015f, tall * 0.055f, 3 * r->u, 11 * r->u, 7 * r->u,
-                               P_HIDDEN, a);
-            int q = P(r, 8);
+                draw_circle_aa(r->c, sx[0], hy, hr, hw, 11 * r->u, 7 * r->u, pass ? P_HIDDEN : P_HALO,
+                               pass ? a : P_HALO_A * a / 255);
+            float q = (float)P(r, 8);
             for (int j = 5; j < SEEKER_N_JOINTS; j++)
-                if (ok[j])
-                    draw_fill_a(r->c, (int)lroundf(sx[j]) - q / 2, (int)lroundf(sy[j]) - q / 2, q, q, P_HIDDEN, a);
-            r->n_skel++;
+                if (ok[j] && pass)
+                    plan_square(r->c, r->u, (float)lroundf(sx[j]), (float)lroundf(sy[j]), q, P_HIDDEN, a);
+            if (pass)
+                r->n_skel++;
         }
     }
     if (nb == 0) { /* no skeleton: a dashed cross at the centre of the hull */
         float cx = x + w * 0.5f, cy = y + h * 0.5f, arm = fminf((float)w, (float)h) * 0.22f;
+        plan_halo_dash(r->c, r->u, cx - arm, cy, cx + arm, cy, 2 * r->u, 8 * r->u, 5 * r->u, a);
+        plan_halo_dash(r->c, r->u, cx, cy - arm, cx, cy + arm, 2 * r->u, 8 * r->u, 5 * r->u, a);
         draw_dashed_aa(r->c, cx - arm, cy, cx + arm, cy, 2 * r->u, 8 * r->u, 5 * r->u, DRAW_CAP_BUTT, P_HIDDEN, a);
         draw_dashed_aa(r->c, cx, cy - arm, cx, cy + arm, 2 * r->u, 8 * r->u, 5 * r->u, DRAW_CAP_BUTT, P_HIDDEN, a);
     }
@@ -1247,14 +1263,15 @@ static void p_label(rc *r, const wv_item *it, const seeker_track *k, const int b
     p_words(r, it, k, title, sizeof title, val, sizeof val, NULL);
     int alarm = p_alarm(r, it, k);
     if (it->direct) {
-        plan_line l[2] = { { title, DRAW_FONT_SANS_SEMIBOLD, 19, alarm && p_down(k) ? P_RED : P_INK, 255 },
-                           { val, DRAW_FONT_MONO, 15, alarm ? P_RED : P_INK, alarm ? 255 : P_INK2_A } };
-        p_tag(r, b[0], b[1], b[2], 18, 46, 30, l, 2, alarm ? P_RED : P_INK, alarm);
+        const anim_fx *f = &r->fx;
+        plan_line l[2] = { { title, DRAW_FONT_SANS_SEMIBOLD, 19, anim_alert_tint(f, alarm && p_down(k) ? P_ALERT : P_INK), 255 },
+                           { val, DRAW_FONT_MONO, 15, anim_alert_tint(f, alarm ? P_ALERT : P_INK), alarm ? 255 : P_INK2_A } };
+        p_tag(r, b[0], b[1], b[2], 18, 46, 30, l, 2, anim_alert_tint(f, alarm ? P_ALERT : P_SEEN), alarm);
         return;
     }
-    plan_line l[2] = { { title, DRAW_FONT_SANS_SEMIBOLD, 19, alarm ? P_RED : P_HIDDEN, 255 },
+    plan_line l[2] = { { title, DRAW_FONT_SANS_SEMIBOLD, 19, anim_alert_tint(&r->fx, alarm ? P_ALERT : P_HIDDEN), 255 },
                        { val, DRAW_FONT_MONO, 15, P_INK, P_INK2_A } };
-    p_tag(r, b[0], b[1], b[2], 20, 40, 34, l, 2, alarm ? P_RED : P_HIDDEN, alarm);
+    p_tag(r, b[0], b[1], b[2], 20, 40, 34, l, 2, anim_alert_tint(&r->fx, alarm ? P_ALERT : P_HIDDEN), alarm);
 }
 
 static void p_inset_rect(const rc *r, int *x, int *y, int *w, int *h)
@@ -1269,7 +1286,7 @@ static void p_edge(rc *r, const wv_item *it, const seeker_track *k, int slot)
 {
     wv_edge e = wv_edge_for(it->bearing_deg);
     int alarm = p_alarm(r, it, k), a = p_stale(r, k) ? 120 : 255;
-    uint32_t col = alarm ? P_RED : it->direct ? P_INK : P_HIDDEN;
+    uint32_t col = anim_alert_tint(&r->fx, alarm ? P_ALERT : it->direct ? P_SEEN : P_HIDDEN);
     float s = 16 * r->u;
     int row = P(r, 76), off = (slot % 2 ? 1 : -1) * ((slot + 1) / 2) * row;
     int ylo = P(r, 24) + (int)s, yhi = r->c->h - P(r, 24) - plan_title_h(r->u) - (int)s;
@@ -1284,9 +1301,13 @@ static void p_edge(rc *r, const wv_item *it, const seeker_track *k, int slot)
     for (int m = 0; m < (e.behind ? 2 : 1); m++) {
         float tx = tip + in * m * s * 0.75f;
         if (it->direct) {
+            plan_halo_line(r->c, r->u, tx, (float)cy, tx + in * s, cy - s, 2 * r->u, DRAW_CAP_SQUARE, a);
+            plan_halo_line(r->c, r->u, tx, (float)cy, tx + in * s, cy + s, 2 * r->u, DRAW_CAP_SQUARE, a);
             draw_line_aa(r->c, tx, (float)cy, tx + in * s, cy - s, 2 * r->u, DRAW_CAP_SQUARE, col, a);
             draw_line_aa(r->c, tx, (float)cy, tx + in * s, cy + s, 2 * r->u, DRAW_CAP_SQUARE, col, a);
         } else {
+            plan_halo_dash(r->c, r->u, tx, (float)cy, tx + in * s, cy - s, 2 * r->u, 5 * r->u, 4 * r->u, a);
+            plan_halo_dash(r->c, r->u, tx, (float)cy, tx + in * s, cy + s, 2 * r->u, 5 * r->u, 4 * r->u, a);
             draw_dashed_aa(r->c, tx, (float)cy, tx + in * s, cy - s, 2 * r->u, 5 * r->u, 4 * r->u, DRAW_CAP_BUTT, col, a);
             draw_dashed_aa(r->c, tx, (float)cy, tx + in * s, cy + s, 2 * r->u, 5 * r->u, 4 * r->u, DRAW_CAP_BUTT, col, a);
         }
@@ -1295,14 +1316,14 @@ static void p_edge(rc *r, const wv_item *it, const seeker_track *k, int slot)
     snprintf(turn, sizeof turn, ", %.0f\xc2\xb0 %s%s", e.turn_deg, e.side > 0 ? "right" : "left",
              e.behind ? ", behind you" : "");
     p_words(r, it, k, title, sizeof title, val, sizeof val, turn);
-    plan_line l[2] = { { title, DRAW_FONT_SANS_SEMIBOLD, 19, alarm ? P_RED : it->direct ? P_INK : P_HIDDEN, 255 },
-                       { val, DRAW_FONT_MONO, 15, alarm && it->direct ? P_RED : P_INK,
+    plan_line l[2] = { { title, DRAW_FONT_SANS_SEMIBOLD, 19, alarm ? P_ALERT : it->direct ? P_INK : P_HIDDEN, 255 },
+                       { val, DRAW_FONT_MONO, 15, alarm && it->direct ? P_ALERT : P_INK,
                          alarm && it->direct ? 255 : P_INK2_A } };
     int pw, ph;
     plan_plate_size(r->u, l, 2, &pw, &ph);
     int px = e.side > 0 ? (int)(tip - s * 2) - pw : (int)(tip + s * 2);
     int py = place_label(r, px, cy - ph / 2, pw, ph);
-    plan_plate(r->c, r->u, px, py, l, 2, col, alarm);
+    anim_alert_plate(r->c, r->u, px, py, l, 2, col, alarm, &r->fx);
 }
 
 /* Position cell and warning words for the wearer's pose (fusion's pose_src for the wearer). */
@@ -1324,17 +1345,18 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
     const char *src = self ? self->pose_src : "";
     /* What needs saying first (top left), then what the frame is. */
     char wt[64] = "", wv_[64] = "";
-    uint32_t wedge = P_INK;
+    uint32_t wedge = P_ALERT; /* every warning plate has the alert edge */
+    int wred = 0;             /* and the worst also an alert title */
     if (!t) {
         snprintf(wt, sizeof wt, "Waiting for fusion");
-        wedge = P_RED;
+        wred = 1;
     } else if (!s->wearer_state[0]) {
         snprintf(wt, sizeof wt, "%s not in fusion", w->node);
         snprintf(wv_, sizeof wv_, "check the phone link");
     } else if (strcmp(s->wearer_state, "ok") != 0) {
         snprintf(wt, sizeof wt, "%s %s", w->node, !strcmp(s->wearer_state, "lost") ? "lost" : "waiting");
         snprintf(wv_, sizeof wv_, "showing people behind walls only");
-        wedge = P_RED;
+        wred = 1;
     } else if (s->pose_mode == WV_MODE_HELD) {
         if (!strcmp(src, "heading")) {
             snprintf(wt, sizeof wt, "%s on compass", w->node);
@@ -1349,7 +1371,7 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
     } else if (other_node && video) {
         snprintf(wt, sizeof wt, "Video from %s, not %s", video->node_id, w->node);
     }
-    plan_line wl[2] = { { wt, DRAW_FONT_SANS_SEMIBOLD, 19, wedge == P_RED ? P_RED : P_INK, 255 },
+    plan_line wl[2] = { { wt, DRAW_FONT_SANS_SEMIBOLD, 19, wred ? P_ALERT : P_INK, 255 },
                         { wv_, DRAW_FONT_MONO, 15, P_INK, P_INK2_A } };
     int wn = wv_[0] ? 2 : 1, ww = 0, wh = 0;
     if (wt[0]) {
@@ -1389,6 +1411,7 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 d[6] = it->level;
             }
             r->n_posture[k->posture >= 0 && k->posture <= SEEKER_POSTURE_DOWN ? k->posture : 0]++;
+            r->fx = anim_alert_track(k->id, p_alarm(r, it, k), p_down(k));
             /* Marks: people behind walls first, then seen people over them. A change of look
              * dissolves: the old look fades out in the same box while the new one fades in. */
             if (it->fade < 1.0f) {
@@ -1425,6 +1448,7 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                     s->n_unplaced++;
                 continue;
             }
+            r->fx = anim_alert_track(k->id, p_alarm(r, it, k), p_down(k));
             if (it->in_fov && pass == it->direct) {
                 if (i < SEEKER_MAX_TRACKS)
                     p_label(r, it, k, box[i]);
@@ -1475,7 +1499,7 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
     }
     plan_title_block(c, r->u, cam, late, t, w->node, pos, v->delay_text);
     if (wt[0])
-        plan_plate(c, r->u, P(r, 24), P(r, 24), wl, wn, wedge, 0);
+        anim_alert_warn(c, r->u, P(r, 24), P(r, 24), wl, wn, wedge);
     s->n_skel = r->n_skel;
     s->n_fading = r->n_fading;
     memcpy(s->n_posture, r->n_posture, sizeof s->n_posture);
