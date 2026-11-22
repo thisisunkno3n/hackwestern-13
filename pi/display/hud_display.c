@@ -28,6 +28,7 @@
  * display (a 4K monitor otherwise means 4x the pixels to draw, scale video into and copy).
  */
 
+#include "anim.h"
 #include "hud_render.h"
 #include "latency.h"
 #include "seeker_config.h"
@@ -82,7 +83,7 @@ static int usage(const char *argv0)
             "       [--view-node Rn] [--mirror [none|h|v]] [--ppm path] [--ppm-every n]\n"
             "       [--run-for s] [--no-health] [--video-port n] [--video-prio n] [--no-video]\n"
             "       [--frame-sync on|off] [--screen-buffer WxH] [--vsync on|off]\n"
-            "       [--theme plan|classic]\n"
+            "       [--theme plan|classic] [--anim on|off]\n"
             "  wearer view: [--wearer-node W] [--wearer-pose [W=]x,y,yaw]\n"
             "       [--wearer-pose-src auto|static|fusion] [--wearer-hfov deg]\n"
             "       [--wearer-image WxH] [--wearer-cam-h m] [--wearer-pitch deg] [--xray-up deg]\n"
@@ -97,7 +98,7 @@ int main(int argc, char **argv)
 {
     const char *cfg_path = "config/seeker.json";
     const char *sink_kind = NULL, *bg = NULL, *view = NULL, *mirror = NULL, *ppm = NULL;
-    const char *theme = NULL;
+    const char *theme = NULL, *anim = NULL;
     int ppm_every = 0, use_health = 1, use_video = 1, video_port = SEEKER_PORT_VIDEO;
     int video_prio = -1, frame_sync = 1, buf_w = 0, buf_h = 0, vsync = 1;
     double run_for = 0;
@@ -117,6 +118,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--sink") && v) sink_kind = argv[++i];
         else if (!strcmp(a, "--background") && v) bg = argv[++i];
         else if (!strcmp(a, "--theme") && v) theme = argv[++i];
+        else if (!strcmp(a, "--anim") && v) anim = argv[++i];
         else if (!strcmp(a, "--view") && v) bg = view_mode = argv[++i];
         else if (!strcmp(a, "--view-node") && v) view = argv[++i];
         else if (!strcmp(a, "--mirror")) /* bare --mirror: horizontal, for the visor */
@@ -221,6 +223,13 @@ int main(int argc, char **argv)
         snprintf(cfg.theme, sizeof cfg.theme, "plan");
     }
     draw_set_theme(draw_theme_parse(cfg.theme));
+    if (anim && !strcmp(anim, "off"))
+        cfg.anim = 0;
+    else if (anim && !strcmp(anim, "on"))
+        cfg.anim = 1;
+    else if (anim)
+        seeker_log("unknown --anim %s (on or off), keeping %s", anim, cfg.anim ? "on" : "off");
+    anim_set_enabled(cfg.anim); /* plan theme only: classic never animates */
     if (view) snprintf(cfg.view_node, sizeof cfg.view_node, "%s", view);
     if (mirror) snprintf(cfg.mirror, sizeof cfg.mirror, "%s", mirror);
     if (strcmp(cfg.mirror, "none") && strcmp(cfg.mirror, "h") && strcmp(cfg.mirror, "v")) {
@@ -332,9 +341,10 @@ int main(int argc, char **argv)
     int policy = 0, prio = 0;
     if (pthread_getschedparam(pthread_self(), &policy, &sp) == 0)
         prio = sp.sched_priority;
-    seeker_log("sink %s %dx%d, background %s%s%s, mirror %s, priority %d, theme %s", cfg.sink,
+    seeker_log("sink %s %dx%d, background %s%s%s, mirror %s, priority %d, theme %s%s", cfg.sink,
                sink.w, sink.h, cfg.background, strcmp(cfg.background, "wearer") ? "" : " view ",
-               strcmp(cfg.background, "wearer") ? "" : cfg.view_node, cfg.mirror, prio, cfg.theme);
+               strcmp(cfg.background, "wearer") ? "" : cfg.view_node, cfg.mirror, prio, cfg.theme,
+               draw_theme() == DRAW_THEME_PLAN ? (cfg.anim ? ", animations on" : ", animations off") : "");
     if (eagle) {
         const wv_config *w = &wearer.cfg;
         seeker_log("eagleeye: wearer %s pose %.2f,%.2f,%.1f (%s), hfov %.1f, image %dx%d, "
@@ -428,7 +438,7 @@ int main(int argc, char **argv)
                          video_rx_state(vf, vrx ? &vs : NULL, t0), vrx ? vs.fps : 0,
                          eagle ? &wearer : NULL, video_rx_why(vf, vrx ? &vs : NULL, t0),
                          video_rx_frozen(vf, vrx ? &vs : NULL, t0, VIDEO_FREEZE_MS),
-                         lat_show ? lat_txt : NULL };
+                         lat_show ? lat_txt : NULL, t0 /* now_ms: the plan animations' frame time */ };
         if (st.video_why != video_why && t0 - video_why_ms >= 1000) {
             if (st.video_why == VIDEO_WHY_OK)
                 seeker_log("video: ok, %s picture on the HUD", vf->node_id);

@@ -2,8 +2,12 @@
  * the fusion rules, the IF-5.6 video path (SKV2 framing, JPEG decode, letterbox scale, TCP
  * receiver) and the EagleEye wearer view (projection, x-ray classification, mirror). */
 
+#include "anim.h"
+#include "anim_alert.h"
+#include "anim_map.h"
 #include "hud_render.h"
 #include "latency.h"
+#include "anim_person.h"
 #include "plan.h"
 #include "projection.h"
 #include "seeker_config.h"
@@ -3486,14 +3490,15 @@ static int count_near_rgb(const canvas *c, uint32_t col, int tol, int x0, int x1
 }
 
 /* Pixels with the hidden-line hue (pale yellow over a dark frame), at any anti-aliased strength. */
-static int count_warm(const canvas *c, int x0, int x1, int y0, int y1)
+/* Pixels in the plan theme's behind-a-wall green (P_HIDDEN, also blended over video). */
+static int count_hidden(const canvas *c, int x0, int x1, int y0, int y1)
 {
     int n = 0;
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) {
             uint32_t p = c->px[y * c->stride + x];
             int r = (int)((p >> 16) & 255), g = (int)((p >> 8) & 255), b = (int)(p & 255);
-            n += r >= 80 && r > b + 30 && g > b + 15;
+            n += g >= 80 && g > r + 40 && g > b + 15;
         }
     return n;
 }
@@ -3523,6 +3528,7 @@ static void test_plan_render(void)
         k->pts[j][2] = 0.9f;
     }
     draw_set_theme(DRAW_THEME_PLAN);
+    anim_person_set_enabled(0); /* the settled plan look; arrivals are tested in test_anim_person */
     wv_render(&c, &cfg, &v, &t, 0, NULL);
     CHECK(v.last.n_xray == 1 && v.last.n_skel == 1);
     int hidden = count_rgb(&c, P_HIDDEN, W / 2 - 60, W / 2 + 60, 0, H);
@@ -3532,36 +3538,36 @@ static void test_plan_render(void)
     /* No pts: the hull and a dashed cross, still hidden colour, no skeleton counted. */
     k->has_pts = 0;
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    CHECK(v.last.n_skel == 0 && v.last.n_xray == 1 && count_warm(&c, W / 2 - 30, W / 2 + 30, 0, H) > 10);
+    CHECK(v.last.n_skel == 0 && v.last.n_xray == 1 && count_hidden(&c, W / 2 - 30, W / 2 + 30, 0, H) > 10);
     /* Seen and close (1 m): red; far (6 m): no red at all. */
     snprintf(k->nodes, sizeof k->nodes, "W+R2");
     k->room_y_m = 1.0f;
     v.clock_ms = 1000;
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    int red = count_near_rgb(&c, P_RED, 70, 0, W, 0, H);
+    int red = count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H);
     printf("plan close person: %d red px\n", red);
     CHECK(v.last.n_direct == 1 && red > 50);
     memset(v.colours, 0, sizeof v.colours);
     k->room_y_m = 6.0f;
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    CHECK(v.last.n_direct == 1 && count_near_rgb(&c, P_RED, 70, 0, W, 0, H) == 0);
+    CHECK(v.last.n_direct == 1 && count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H) == 0);
     /* Down is red even far away (the rescue case); crouching is not. */
     k->posture = SEEKER_POSTURE_CROUCH;
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    CHECK(v.last.n_posture[SEEKER_POSTURE_CROUCH] == 1 && count_near_rgb(&c, P_RED, 70, 0, W, 0, H) == 0);
+    CHECK(v.last.n_posture[SEEKER_POSTURE_CROUCH] == 1 && count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H) == 0);
     k->posture = SEEKER_POSTURE_DOWN;
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    CHECK(v.last.n_posture[SEEKER_POSTURE_DOWN] == 1 && count_near_rgb(&c, P_RED, 70, 0, W, 0, H) > 30);
+    CHECK(v.last.n_posture[SEEKER_POSTURE_DOWN] == 1 && count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H) > 30);
     /* Down behind a wall: the plate goes red, the ghost stays in the hidden colour. */
     snprintf(k->nodes, sizeof k->nodes, "R2");
     k->room_y_m = 3.0f;
     k->has_pts = 1;
     memset(v.colours, 0, sizeof v.colours); /* another scene: not the seen person held */
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    printf("plan down behind wall: %d red px, %d hidden-line px\n", count_near_rgb(&c, P_RED, 70, 0, W, 0, H),
-           count_warm(&c, 0, W, 0, H));
-    CHECK(v.last.n_xray == 1 && v.last.n_skel == 1 && count_near_rgb(&c, P_RED, 70, 0, W, 0, H) > 30 &&
-          count_warm(&c, 0, W, 0, H) > 60);
+    printf("plan down behind wall: %d red px, %d hidden-line px\n", count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H),
+           count_hidden(&c, 0, W, 0, H));
+    CHECK(v.last.n_xray == 1 && v.last.n_skel == 1 && count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H) > 30 &&
+          count_hidden(&c, 0, W, 0, H) > 60);
     k->posture = SEEKER_POSTURE_UNKNOWN;
     /* The title block grows a Delay cell for the latency readout. */
     CHECK(plan_title_block(NULL, 1.0f, "R1 live", 0, &t, "W", "Fixed", "140 ms") >
@@ -3592,9 +3598,1011 @@ static void test_plan_render(void)
     int m24 = (int)lroundf(24 * u), h = H - 2 * m24 - plan_title_h(u) - (int)lroundf(16 * u);
     float ppm = ((float)h * 0.72f - 40 * u) / 6.0f, ay = (float)m24 + (float)(int)lroundf((float)h * 0.72f);
     int px0 = W / 2 - 1, py0 = (int)lroundf(ay - 3.0f * ppm);
-    CHECK(count_rgb(&c, P_INK, px0 - 3, px0 + 3, py0 - 3, py0 + 3) > 4);
+    CHECK(count_rgb(&c, P_SEEN, px0 - 3, px0 + 3, py0 - 3, py0 + 3) > 4);
+    draw_set_theme(DRAW_THEME_CLASSIC);
+    anim_person_set_enabled(1);
+    free(c.px);
+}
+
+/* ---- plan theme alert animations (display/anim_alert.h) ---- */
+
+static int canvas_eq(const canvas *a, const canvas *b)
+{
+    return memcmp(a->px, b->px, (size_t)a->w * (size_t)a->h * 4) == 0;
+}
+
+static int canvas_diff(const canvas *a, const canvas *b)
+{
+    int n = 0;
+    for (int i = 0; i < a->w * a->h; i++)
+        n += a->px[i] != b->px[i];
+    return n;
+}
+
+static void test_anim_alert(void)
+{
+    anim_alert_set_enabled(1);
+    anim_alert_reset();
+    /* No frame time: everything is the plain plan look. */
+    anim_fx f = anim_alert_track(5, 1, 1);
+    CHECK(!f.on && anim_alert_tint(&f, P_SEEN) == P_SEEN && anim_alert_alpha(&f, 255) == 255);
+
+    /* Entering: the alert is on and red on the entering frame; the hatch starts at 20% and is
+     * full by 200 ms. */
+    anim_alert_frame(1000);
+    f = anim_alert_track(5, 0, 0);
+    CHECK(f.on && !f.alert && f.leave == 0 && f.ring < 0 && f.pulse == 1);
+    anim_alert_frame(1033);
+    f = anim_alert_track(5, 1, 0);
+    CHECK(f.on && f.alert && NEAR(f.hatch, ANIM_HATCH_START, 1e-6) && f.ring < 0 && f.pulse == 1);
+    CHECK(anim_alert_tint(&f, P_ALERT) == P_ALERT); /* no blend in: full alert colour at once */
+    f = anim_alert_track(5, 1, 0);                  /* asking again this frame changes nothing */
+    CHECK(NEAR(f.hatch, ANIM_HATCH_START, 1e-6));
+    anim_alert_frame(1133);
+    f = anim_alert_track(5, 1, 0);
+    CHECK(f.hatch > ANIM_HATCH_START && f.hatch < 1);
+    anim_alert_frame(1233);
+    f = anim_alert_track(5, 1, 0);
+    CHECK(f.hatch == 1);
+    /* Leaving: fades from the alert colour back to normal over 200 ms. */
+    anim_alert_frame(1500);
+    f = anim_alert_track(5, 0, 0);
+    CHECK(!f.alert && NEAR(f.leave, 1, 1e-6) && anim_alert_tint(&f, P_SEEN) == P_ALERT);
+    anim_alert_frame(1600);
+    f = anim_alert_track(5, 0, 0);
+    uint32_t mid = anim_alert_tint(&f, P_SEEN);
+    CHECK(NEAR(f.leave, 0.5, 1e-3) && mid != P_SEEN && mid != P_ALERT);
+    anim_alert_frame(1700);
+    f = anim_alert_track(5, 0, 0);
+    CHECK(f.leave == 0 && anim_alert_tint(&f, P_SEEN) == P_SEEN);
+    /* Back into the alert while the hatch was still fading: it stays full (no restart). */
+    anim_alert_frame(1800);
+    anim_alert_track(5, 1, 0);
+    anim_alert_frame(1850);
+    anim_alert_track(5, 0, 0);
+    anim_alert_frame(1900);
+    f = anim_alert_track(5, 1, 0);
+    CHECK(f.alert && f.hatch == 1);
+
+    /* Person down: ring ping for 500 ms from the entering frame, then the breathing pulse,
+     * period 1.2 s, never below 70%. */
+    anim_alert_frame(2000);
+    f = anim_alert_track(6, 1, 1);
+    CHECK(f.alert && f.down && f.ring == 0 && f.pulse == 1);
+    anim_alert_frame(2250);
+    f = anim_alert_track(6, 1, 1);
+    CHECK(NEAR(f.ring, 0.5, 1e-3) && f.pulse == 1);
+    anim_alert_frame(2500);
+    f = anim_alert_track(6, 1, 1);
+    CHECK(f.ring < 0 && NEAR(f.pulse, 1, 1e-6));
+    anim_alert_frame(3100);
+    f = anim_alert_track(6, 1, 1);
+    CHECK(NEAR(f.pulse, ANIM_PULSE_MIN, 1e-4)); /* half a period in: the low point */
+    anim_alert_frame(3700);
+    f = anim_alert_track(6, 1, 1);
+    CHECK(NEAR(f.pulse, 1, 1e-4)); /* a full period: back to 100% */
+    float lo = 2, hi = -1;
+    int alo = 256;
+    for (int64_t t = 3701; t < 12000; t += 7) {
+        anim_alert_frame(t);
+        f = anim_alert_track(6, 1, 1);
+        lo = fminf(lo, f.pulse), hi = fmaxf(hi, f.pulse);
+        int a = anim_alert_alpha(&f, 255);
+        if (a < alo)
+            alo = a;
+    }
+    printf("anim down pulse: %.3f to %.3f, lowest frame alpha %d of 255\n", lo, hi, alo);
+    CHECK(lo >= ANIM_PULSE_MIN - 1e-5f && lo < ANIM_PULSE_MIN + 0.01f && hi <= 1.0f && hi > 0.99f);
+    CHECK(alo >= 178); /* 70% of 255 */
+    /* Down without the alert (stale) is not down. */
+    f = anim_alert_track(9, 0, 1);
+    CHECK(!f.down && f.ring < 0 && f.pulse == 1);
+
+    /* Removal and id reuse: unseen for ANIM_FORGET_MS, the id starts fresh. */
+    anim_alert_frame(20000);
+    anim_alert_track(7, 1, 0);
+    anim_alert_frame(20000 + ANIM_FORGET_MS + 1);
+    f = anim_alert_track(7, 1, 0);
+    CHECK(f.alert && NEAR(f.hatch, ANIM_HATCH_START, 1e-6));
+    /* No id: no state. A full table: the extras get the plain look, nothing breaks. */
+    f = anim_alert_track(0, 1, 1);
+    CHECK(!f.on && f.alert);
+    for (int id = 100; id < 100 + ANIM_ALERT_SLOTS + 4; id++)
+        f = anim_alert_track(id, 1, 0);
+    CHECK(!f.on);
+    /* Time going back (hud_shot jumping) starts over; off is the plain look. */
+    anim_alert_frame(500);
+    f = anim_alert_track(7, 1, 0);
+    CHECK(f.on && NEAR(f.hatch, ANIM_HATCH_START, 1e-6));
+    anim_alert_set_enabled(0);
+    f = anim_alert_track(7, 1, 1);
+    CHECK(!f.on && !anim_alert_enabled());
+    anim_alert_set_enabled(1);
+
+    /* Title block cells and warning plates on a canvas. */
+    draw_set_theme(DRAW_THEME_PLAN);
+    const int W = 640, H = 360;
+    canvas a = { calloc((size_t)W * H, 4), W, H, W }, b = { calloc((size_t)W * H, 4), W, H, W };
+    CHECK(a.px && b.px);
+    if (!a.px || !b.px) {
+        free(a.px);
+        free(b.px);
+        return;
+    }
+    anim_alert_reset();
+    anim_alert_frame(1000);
+    anim_alert_cell(&a, 0, 20, 20, 15, P_INK, "R1 live 1", 10, 10, 200, 40);
+    /* Digits only ("1.2 s late" to "1.3 s late", the clock): swapped at once, crisp. */
+    anim_alert_frame(1033);
+    draw_clear(&a, 0);
+    anim_alert_cell(&a, 0, 20, 20, 15, P_INK, "R1 live 2", 10, 10, 200, 40);
+    anim_alert_frame(1066);
+    draw_clear(&a, 0);
+    draw_clear(&b, 0);
+    anim_alert_cell(&a, 0, 20, 20, 15, P_INK, "R1 live 3", 10, 10, 200, 40);
+    draw_ui_text_top(&b, 20, 20, 15, DRAW_FONT_MONO, P_INK, 255, "R1 live 3");
+    CHECK(canvas_eq(&a, &b));
+    /* New words: crossfade, the new value already drawn (60% or more) on the changing frame,
+     * plain text once 150 ms have passed. */
+    anim_alert_frame(1100);
+    draw_clear(&a, 0);
+    anim_alert_cell(&a, 0, 20, 20, 15, P_ALERT, "Video 1.2 s late", 10, 10, 200, 40);
+    draw_clear(&b, 0);
+    draw_ui_text_top(&b, 20, 20, 15, DRAW_FONT_MONO, P_ALERT, 153, "Video 1.2 s late");
+    int ink_a = count_near_rgb(&a, P_ALERT, 120, 0, W, 0, H), ink_b = count_near_rgb(&b, P_ALERT, 120, 0, W, 0, H);
+    CHECK(!canvas_eq(&a, &b) && ink_a > 20 && ink_a >= ink_b * 8 / 10);
+    anim_alert_frame(1100 + ANIM_CELL_MS);
+    draw_clear(&a, 0);
+    draw_clear(&b, 0);
+    anim_alert_cell(&a, 0, 20, 20, 15, P_ALERT, "Video 1.3 s late", 10, 10, 200, 40);
+    draw_ui_text_top(&b, 20, 20, 15, DRAW_FONT_MONO, P_ALERT, 255, "Video 1.3 s late");
+    CHECK(canvas_eq(&a, &b));
+    /* The late hatch sweeps in and fades out. */
+    float sw, k;
+    anim_alert_frame(2000);
+    CHECK(anim_alert_late(1, &sw, &k) && NEAR(sw, ANIM_HATCH_START, 1e-6) && k == 1);
+    anim_alert_frame(2000 + ANIM_HATCH_MS);
+    CHECK(anim_alert_late(1, &sw, &k) && sw == 1 && k == 1);
+    anim_alert_frame(2300);
+    CHECK(anim_alert_late(0, &sw, &k) && k == 1);
+    anim_alert_frame(2400);
+    CHECK(anim_alert_late(0, &sw, &k) && NEAR(k, 0.5, 1e-3));
+    anim_alert_frame(2300 + ANIM_LEAVE_MS);
+    CHECK(!anim_alert_late(0, &sw, &k));
+
+    /* Warning plate: drawn (60%, 8 px up) on its first frame, the plain plate after 150 ms,
+     * sliding out for 150 ms once it is gone. */
+    plan_line wl[2] = { { "R1 position held", DRAW_FONT_SANS_SEMIBOLD, 19, P_INK, 255 },
+                        { "phone lost its marker", DRAW_FONT_MONO, 15, P_INK, P_INK2_A } };
+    draw_clear(&b, 0);
+    plan_plate(&b, 0.5f, 12, 20, wl, 2, P_ALERT, 0);
+    canvas z = { calloc((size_t)W * H, 4), W, H, W };
+    anim_alert_frame(3000);
+    draw_clear(&a, 0);
+    anim_alert_warn(&a, 0.5f, 12, 20, wl, 2, P_ALERT);
+    anim_alert_warn_flush(&a, 0.5f);
+    CHECK(z.px && canvas_diff(&a, &z) > 500 && !canvas_eq(&a, &b));
+    anim_alert_frame(3000 + ANIM_PLATE_MS);
+    draw_clear(&a, 0);
+    anim_alert_warn(&a, 0.5f, 12, 20, wl, 2, P_ALERT);
+    anim_alert_warn_flush(&a, 0.5f);
+    CHECK(canvas_eq(&a, &b));
+    anim_alert_frame(3200);
+    draw_clear(&a, 0);
+    anim_alert_warn_flush(&a, 0.5f); /* gone this frame: still drawn, starting to leave */
+    CHECK(canvas_diff(&a, &z) > 500);
+    anim_alert_frame(3200 + ANIM_PLATE_MS);
+    draw_clear(&a, 0);
+    anim_alert_warn_flush(&a, 0.5f);
+    CHECK(canvas_eq(&a, &z));
+    free(z.px);
+
+    /* Through hud_render: someone steps close. Red on the very frame the state turns true; long
+     * after, the frame equals the plain plan theme exactly; animations off == plan at any time. */
+    static seeker_config cfg;
+    seeker_config_defaults(&cfg);
+    static wv_view v;
+    memset(&v, 0, sizeof v);
+    wv_config_defaults(&v.cfg);
+    v.cfg.visor = 1;
+    v.cfg.radar_fallback = 0;
+    v.box_ease_off = 1;
+    static seeker_tracks t;
+    memset(&t, 0, sizeof t);
+    add_node(&t, "W", "ok", 0, 0, 0);
+    seeker_track *p = add_track(&t, "W", "W", 1, 0.2f, 6.0f);
+    hud_state hs;
+    memset(&hs, 0, sizeof hs);
+    hs.t = &t;
+    hs.tracks_age_ms = 10;
+    hs.background = "wearer";
+    hs.view_node = "W";
+    hs.wearer = &v;
+    hs.video_state = VIDEO_LOST;
+    anim_alert_reset();
+    anim_person_set_enabled(0); /* this tests the alert module alone: no appear trace, */
+    anim_map_set_enabled(0);    /* no map scan line */
+    hs.now_ms = v.clock_ms = 50000;
+    hud_render(&a, &cfg, &hs);
+    CHECK(count_near_rgb(&a, P_ALERT, 70, 0, W, 0, H) == 0);
+    p->room_y_m = 1.0f;
+    memset(v.colours, 0, sizeof v.colours); /* the colour hold is fusion's business, not ours */
+    hs.now_ms = v.clock_ms = 50033;
+    hud_render(&a, &cfg, &hs);
+    int red = count_near_rgb(&a, P_ALERT, 70, 0, W, 0, H);
+    printf("anim entering frame: %d alert px\n", red);
+    CHECK(v.last.n_direct == 1 && red > 50);
+    /* The same moment with animations off differs only by decoration (the hatch sweep). */
+    anim_alert_set_enabled(0);
+    hud_render(&b, &cfg, &hs);
+    anim_alert_set_enabled(1);
+    CHECK(!canvas_eq(&a, &b) && count_near_rgb(&b, P_ALERT, 70, 0, W, 0, H) > 50);
+    /* Steady (a second in): pixel-identical to the plain plan look (animations off, and no
+     * frame time). The title block's clock can tick between renders, so try twice. */
+    int same = 0;
+    for (int tries = 0; tries < 2 && !same; tries++) {
+        hs.now_ms = v.clock_ms = 51033;
+        hud_render(&a, &cfg, &hs);
+        anim_alert_set_enabled(0);
+        hud_render(&b, &cfg, &hs);
+        anim_alert_set_enabled(1);
+        same = canvas_eq(&a, &b);
+    }
+    CHECK(same);
+    /* Off == plan at any moment, including the transition frames. */
+    p->room_y_m = 6.0f;
+    same = 0;
+    for (int tries = 0; tries < 2 && !same; tries++) {
+        anim_alert_set_enabled(0);
+        hs.now_ms = v.clock_ms = 52000;
+        hud_render(&a, &cfg, &hs);
+        hs.now_ms = 0;
+        anim_alert_set_enabled(1);
+        hud_render(&b, &cfg, &hs);
+        same = canvas_eq(&a, &b);
+    }
+    CHECK(same);
+    /* Leaving: 100 ms after the alert ended the colour is still on its way back. */
+    anim_alert_reset();
+    p->room_y_m = 1.0f;
+    hs.now_ms = v.clock_ms = 60000;
+    hud_render(&a, &cfg, &hs);
+    memset(v.colours, 0, sizeof v.colours); /* drop the colour hysteresis: far at once */
+    p->room_y_m = 6.0f;
+    hs.now_ms = v.clock_ms = 60100;
+    hud_render(&a, &cfg, &hs);
+    hs.now_ms = v.clock_ms = 60200;
+    hud_render(&a, &cfg, &hs);
+    int fading = count_near_rgb(&a, P_SEEN, 40, 0, W, 0, H);
+    hs.now_ms = v.clock_ms = 60400;
+    hud_render(&a, &cfg, &hs);
+    int settled = count_near_rgb(&a, P_SEEN, 40, 0, W, 0, H);
+    printf("anim leaving: %d seen-colour px mid fade, %d settled\n", fading, settled);
+    CHECK(settled > 30 && fading < settled);
+
+    /* Cleanup: no animation state or frame time leaks into later tests. */
+    anim_alert_reset();
+    anim_alert_set_enabled(1);
+    draw_set_theme(DRAW_THEME_CLASSIC);
+    anim_person_set_enabled(1);
+    anim_map_set_enabled(1);
+    free(a.px);
+    free(b.px);
+}
+
+/* ---- person animations (display/anim_person.h) ---- */
+
+/* One frame in which only track `id` is drawn in view. */
+static ap_fx ap_step(int64_t tm, int id, int direct)
+{
+    static wv_item it;
+    static seeker_track k;
+    int b[4] = { 10, 10, 40, 90 };
+    anim_person_begin(tm, 1.0f);
+    ap_fx f = anim_person_track(id, direct);
+    k.id = id;
+    it.direct = direct;
+    anim_person_store(id, &it, &k, b);
+    anim_person_end();
+    return f;
+}
+
+/* Track `id` drawn every 33 ms from t0 up to and including t1. */
+static void ap_run_to(int64_t t0, int64_t t1, int id, int direct)
+{
+    for (int64_t tm = t0; tm < t1; tm += 33)
+        ap_step(tm, id, direct);
+    ap_step(t1, id, direct);
+}
+
+/* The echo of a lost track this frame (its alpha), or -1 when none is drawn. */
+static float ap_echo_a(void)
+{
+    static wv_item it;
+    static seeker_track k;
+    int b[4];
+    ap_fx f;
+    for (int i = 0; i < AP_SLOTS; i++)
+        if (anim_person_echo(i, &it, &k, b, &f))
+            return f.mark_a;
+    return -1.0f;
+}
+
+static void ap_scene(seeker_tracks *t, int seen_on, int hid_on)
+{
+    memset(t, 0, sizeof *t);
+    add_node(t, "W", "ok", 0, 0, 0);
+    add_node(t, "R2", "ok", -2, 1, 90);
+    if (seen_on) {
+        seeker_track *k = add_track(t, "W", "W", 1, -0.9f, 3.0f);
+        k->id = 1;
+    }
+    if (hid_on) {
+        seeker_track *k = add_track(t, "R2", "R2", 1, 0.9f, 3.0f);
+        k->id = 2;
+        k->has_pts = 1;
+        for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+            k->pts[j][0] = SKEL_T[j][0];
+            k->pts[j][1] = SKEL_T[j][1];
+            k->pts[j][2] = 0.9f;
+        }
+    }
+}
+
+/* Pixels that differ between a and b above the title block row (it prints the wall clock), inside
+ * the rectangle (x0, y0)-(x1, y1). */
+static int ap_diff(const canvas *a, const uint32_t *b, int x0, int y0, int x1, int y1)
+{
+    int ymax = a->h - (int)lroundf(24 * plan_u(a)) - plan_title_h(plan_u(a)) - 2, n = 0;
+    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < ymax; y++)
+        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < a->w; x++)
+            n += a->px[y * a->stride + x] != b[y * a->w + x];
+    return n;
+}
+
+static void test_anim_person(void)
+{
+    const int64_t T = 10000;
+    ap_fx f;
+    anim_person_set_enabled(1);
+
+    /* Seen: corners trace (180 ms), then the leader (120 ms), then the plate (120 ms). */
+    anim_person_reset();
+    f = ap_step(T, 1, 1);
+    CHECK(f.active && f.trace < 0.5f && f.leader == 0.0f && f.plate == 0.0f);
+    f = ap_step(T + 90, 1, 1);
+    CHECK(f.trace > 0.0f && f.trace < 1.0f);
+    f = ap_step(T + 170, 1, 1);
+    CHECK(f.leader == 0.0f);
+    f = ap_step(T + 180, 1, 1);
+    CHECK(f.trace == 1.0f);
+    f = ap_step(T + 300, 1, 1);
+    CHECK(f.leader == 1.0f && f.plate == 0.0f);
+    f = ap_step(T + 360, 1, 1);
+    CHECK(f.plate > 0.0f && f.plate < 1.0f);
+    f = ap_step(T + 420, 1, 1);
+    CHECK(f.plate == 1.0f && !f.active);
+    CHECK(!anim_person_get(1).active && !anim_person_get(99).active);
+
+    /* Behind a wall: 60% at once, full at 150 ms; hatch sweep 220 ms; dashes march. */
+    anim_person_reset();
+    f = ap_step(T, 2, 0);
+    CHECK(f.active && f.mark_a >= 0.6f && f.mark_a < 1.0f);
+    f = ap_step(T + 100, 2, 0);
+    CHECK(f.hatch > 0.0f && f.hatch < 1.0f);
+    f = ap_step(T + 150, 2, 0);
+    CHECK(f.mark_a == 1.0f);
+    f = ap_step(T + 220, 2, 0);
+    CHECK(f.hatch == 1.0f);
+    float m0 = f.march;
+    f = ap_step(T + 420, 2, 0);
+    CHECK(f.plate == 1.0f && f.leader == 1.0f && fabsf(f.march - m0 - 0.012f * 200) < 0.01f);
+
+    /* Lost: an echo at 50% falling to 0 over 220 ms, no plate; then nothing. */
+    const int64_t L = T + 500;
+    anim_person_reset();
+    ap_run_to(T, L, 5, 1);
+    anim_person_begin(L + 100, 1.0f);
+    anim_person_end();
+    float ea = ap_echo_a();
+    printf("anim person: echo alpha %.3f at 100 ms after the track went\n", ea);
+    CHECK(ea > 0.2f && ea < 0.3f && !anim_person_get(5).active);
+    anim_person_begin(L + 220, 1.0f);
+    anim_person_end();
+    CHECK(ap_echo_a() < 0);
+    anim_person_begin(L + 600, 1.0f);
+    anim_person_end();
+    CHECK(ap_echo_a() < 0);
+
+    /* Back during the echo: no replay at all. */
+    anim_person_reset();
+    ap_run_to(T, L, 5, 1);
+    anim_person_begin(L + 100, 1.0f);
+    anim_person_end();
+    f = ap_step(L + 133, 5, 1);
+    CHECK(f.plate == 1.0f && f.trace == 1.0f && ap_echo_a() < 0);
+    /* Back after a second: the plate is up at once, the frame replays its trace. */
+    anim_person_reset();
+    ap_run_to(T, L, 5, 1);
+    anim_person_begin(L + 300, 1.0f);
+    anim_person_end();
+    f = ap_step(L + 1000, 5, 1);
+    CHECK(f.plate == 1.0f && f.trace < 1.0f);
+    /* Back after AP_FORGET_MS (or fusion reusing the id): a new arrival. */
+    anim_person_reset();
+    ap_run_to(T, L, 5, 1);
+    anim_person_begin(L + 300, 1.0f);
+    anim_person_end();
+    f = ap_step(L + AP_FORGET_MS + 500, 5, 1);
+    CHECK(f.plate == 0.0f && f.trace < 0.5f);
+    /* Seen to behind a wall: new marks intro, same plate. */
+    anim_person_reset();
+    ap_run_to(T, L, 7, 1);
+    f = ap_step(L + 33, 7, 0);
+    CHECK(f.hatch < 1.0f && f.mark_a < 1.0f && f.plate == 1.0f);
+
+    /* Capacity: 40 people in one frame (more than fusion ever sends): AP_SLOTS animated, the rest
+     * drawn plainly. The next frame, SEEKER_MAX_TRACKS new people: the 40 are not drawn any more, so
+     * their echoes give way and every new arrival animates. */
+    anim_person_reset();
+    int on1 = 0, on2 = 0;
+    anim_person_begin(T, 1.0f);
+    for (int id = 100; id < 140; id++)
+        on1 += anim_person_track(id, 1).active;
+    anim_person_end();
+    anim_person_begin(T + 33, 1.0f);
+    anim_person_end();
+    anim_person_begin(T + 66, 1.0f);
+    for (int id = 200; id < 200 + SEEKER_MAX_TRACKS; id++)
+        on2 += anim_person_track(id, id & 1).active;
+    anim_person_end();
+    printf("anim person: %d of 40 animated, then %d of %d (table %d)\n", on1, on2, SEEKER_MAX_TRACKS, AP_SLOTS);
+    CHECK(on1 == AP_SLOTS && on2 == SEEKER_MAX_TRACKS);
+
+    /* Off: plain drawing, no echoes. */
+    anim_person_set_enabled(0);
+    f = ap_step(T, 1, 1);
+    CHECK(!f.active && f.plate == 1.0f && f.trace == 1.0f);
+    anim_person_begin(T + 100, 1.0f);
+    anim_person_end();
+    CHECK(ap_echo_a() < 0);
+    anim_person_set_enabled(1);
+
+    /* Rendering. 331500 ms is a whole number of march periods, so at that clock a settled scene
+     * draws exactly the plain plan marks. */
+    static seeker_config cfg;
+    seeker_config_defaults(&cfg);
+    static wv_view v;
+    static seeker_tracks t;
+    const int W = 640, H = 360;
+    const int64_t S = 331500;
+    canvas c = { calloc((size_t)W * H, 4), W, H, W };
+    uint32_t *ref = calloc((size_t)W * H, 4), *ref_none = calloc((size_t)W * H, 4);
+    CHECK(c.px && ref && ref_none);
+    if (!c.px || !ref || !ref_none) {
+        free(c.px);
+        free(ref);
+        free(ref_none);
+        return;
+    }
+    draw_set_theme(DRAW_THEME_PLAN);
+    /* References with the animations off: both people, and nobody. */
+    anim_person_set_enabled(0);
+    memset(&v, 0, sizeof v);
+    wv_config_defaults(&v.cfg);
+    ap_scene(&t, 0, 0);
+    v.clock_ms = S;
+    wv_render(&c, &cfg, &v, &t, 0, NULL);
+    memcpy(ref_none, c.px, (size_t)W * H * 4);
+    memset(&v, 0, sizeof v);
+    wv_config_defaults(&v.cfg);
+    ap_scene(&t, 1, 1);
+    v.clock_ms = S - 1000;
+    wv_render(&c, &cfg, &v, &t, 0, NULL);
+    memcpy(ref, c.px, (size_t)W * H * 4);
+    wv_stats rs = v.last;
+    CHECK(rs.n_direct == 1 && rs.n_xray == 1 && rs.n_drawn == 2);
+
+    /* First frame with the animations on: same boxes in the same places, decorated differently. */
+    anim_person_set_enabled(1);
+    memset(&v, 0, sizeof v);
+    wv_config_defaults(&v.cfg);
+    v.clock_ms = S - 1000;
+    wv_render(&c, &cfg, &v, &t, 0, NULL);
+    int same = v.last.n_drawn == rs.n_drawn;
+    for (int i = 0; same && i < rs.n_drawn; i++)
+        same = v.last.drawn[i].id == rs.drawn[i].id && v.last.drawn[i].x == rs.drawn[i].x &&
+               v.last.drawn[i].y == rs.drawn[i].y && v.last.drawn[i].w == rs.drawn[i].w &&
+               v.last.drawn[i].h == rs.drawn[i].h;
+    int d0 = ap_diff(&c, ref, 0, 0, W, H);
+    CHECK(same && d0 > 0);
+    /* The seen frame's corners are drawn at full strength on the first frame, the middle of its top
+     * edge only faintly (the corners trace towards it). */
+    int sx = -1;
+    for (int i = 0; i < rs.n_drawn; i++)
+        if (rs.drawn[i].direct)
+            sx = i;
+    CHECK(sx >= 0);
+    if (sx >= 0) {
+        int bx = rs.drawn[sx].x, by = rs.drawn[sx].y, bw = rs.drawn[sx].w, hi = 0, mid = 0;
+        for (int y = by - 2; y <= by + 2; y++) {
+            for (int x = bx + 2; x < bx + 6; x++)
+                hi += (int)((c.px[y * W + x] >> 8) & 255) > 100;
+            for (int x = bx + bw / 2 - 2; x <= bx + bw / 2 + 2; x++)
+                mid += (int)((c.px[y * W + x] >> 8) & 255) > 100;
+        }
+        CHECK(hi >= 4 && mid == 0);
+    }
+    /* Settled: pixel for pixel the plain plan drawing. */
+    for (int64_t tm = S - 967; tm < S; tm += 33) {
+        v.clock_ms = tm;
+        wv_render(&c, &cfg, &v, &t, 0, NULL);
+    }
+    v.clock_ms = S;
+    wv_render(&c, &cfg, &v, &t, 0, NULL);
+    int d1 = ap_diff(&c, ref, 0, 0, W, H);
+    printf("anim person: %d px differ on the first frame, %d once settled\n", d0, d1);
+    CHECK(d1 == 0);
+
+    /* Lost (the seen person alone): an echo inside its last box at 50 ms, gone at 230 ms. */
+    memset(&v, 0, sizeof v);
+    wv_config_defaults(&v.cfg);
+    ap_scene(&t, 1, 0);
+    for (int64_t tm = S - 1000; tm <= S; tm += 20) {
+        v.clock_ms = tm;
+        wv_render(&c, &cfg, &v, &t, 0, NULL);
+    }
+    int bx = v.last.drawn[0].x, by = v.last.drawn[0].y, bw = v.last.drawn[0].w, bh = v.last.drawn[0].h;
+    ap_scene(&t, 0, 0);
+    v.clock_ms = S + 50;
+    wv_render(&c, &cfg, &v, &t, 0, NULL);
+    int e50 = ap_diff(&c, ref_none, bx - 4, by - 4, bx + bw + 4, by + bh + 4);
+    v.clock_ms = S + 230;
+    wv_render(&c, &cfg, &v, &t, 0, NULL);
+    int e230 = ap_diff(&c, ref_none, 0, 0, W, H);
+    printf("anim person: echo %d px at 50 ms, %d px at 230 ms\n", e50, e230);
+    CHECK(e50 > 100 && e230 == 0);
     draw_set_theme(DRAW_THEME_CLASSIC);
     free(c.px);
+    free(ref);
+    free(ref_none);
+}
+
+/* ---- the three plan animation modules on one clock and one switch (display/anim.h) ---- */
+
+/* A seen person and one behind a wall arriving at `arrive`, the wearer fixed; hud_render at `now`. */
+static void anim_all_frame(canvas *c, wv_view *v, seeker_tracks *t, int64_t now, int64_t arrive)
+{
+    static seeker_config cfg;
+    seeker_config_defaults(&cfg);
+    memset(t, 0, sizeof *t);
+    add_node(t, "W", "ok", 0, 0, 0);
+    add_node(t, "R2", "ok", -2, 1, 90);
+    if (now >= arrive) {
+        add_track(t, "W", "W", 1, -0.6f, 4.0f)->id = 1;
+        seeker_track *k = add_track(t, "R2", "R2", 1, 0.6f, 4.0f);
+        k->id = 2;
+        k->has_pts = 1;
+        for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+            k->pts[j][0] = SKEL_T[j][0];
+            k->pts[j][1] = SKEL_T[j][1];
+            k->pts[j][2] = 0.9f;
+        }
+    }
+    hud_state hs;
+    memset(&hs, 0, sizeof hs);
+    hs.t = t;
+    hs.tracks_age_ms = 10;
+    hs.background = "wearer";
+    hs.view_node = "W";
+    hs.wearer = v;
+    hs.video_state = VIDEO_LOST;
+    hs.now_ms = now;
+    hud_render(c, &cfg, &hs);
+}
+
+static void anim_all_view(wv_view *v)
+{
+    memset(v, 0, sizeof *v);
+    wv_config_defaults(&v->cfg);
+    v->cfg.visor = 1;
+    v->cfg.radar_fallback = 0;
+    v->cfg.n_walls = 1;
+    v->cfg.walls[0][0] = 0.3f;
+    v->cfg.walls[0][1] = 2.0f;
+    v->cfg.walls[0][2] = 2.5f;
+    v->cfg.walls[0][3] = 2.0f;
+}
+
+static void test_anim_switch(void)
+{
+    enum { W = 640, H = 360 };
+    canvas a = { calloc((size_t)W * H, 4), W, H, W }, b = { calloc((size_t)W * H, 4), W, H, W };
+    CHECK(a.px && b.px);
+    if (!a.px || !b.px)
+        return;
+    static wv_view v;
+    static seeker_tracks t;
+    draw_set_theme(DRAW_THEME_PLAN);
+    const int64_t T = 70000;
+    /* One clock: hud_render hands now_ms to the wearer view (the person animations). */
+    anim_set_enabled(1);
+    anim_alert_reset();
+    anim_person_reset();
+    anim_map_reset();
+    anim_all_view(&v);
+    anim_all_frame(&a, &v, &t, T - 500, T);
+    CHECK(v.clock_ms == T - 500);
+    anim_all_frame(&a, &v, &t, T + 60, T); /* both people arriving, the map pinging */
+    CHECK(v.clock_ms == T + 60 && v.last.n_direct == 1 && v.last.n_xray == 1);
+    /* Off: every moment draws the same still plan, equal to a fresh view with no clock at all.
+     * (The title block's clock can tick between renders: try twice.) */
+    int same = 0, animated = 0;
+    for (int tries = 0; tries < 2 && !same; tries++) {
+        anim_set_enabled(0);
+        anim_all_view(&v);
+        anim_all_frame(&b, &v, &t, 0, 0); /* reference: no clock */
+        int ok = 1;
+        static const int64_t at[] = { T + 60, T + 200, T + 1500, T + 4000 };
+        for (int i = 0; i < 4; i++) {
+            anim_all_view(&v);
+            anim_all_frame(&a, &v, &t, T - 500, T);
+            anim_all_frame(&a, &v, &t, at[i], T);
+            ok = ok && canvas_eq(&a, &b);
+        }
+        same = ok;
+    }
+    CHECK(same);
+    /* On: the arrival frame is decorated (trace, sweep, ping), so it differs from the still. */
+    anim_set_enabled(1);
+    anim_alert_reset();
+    anim_person_reset();
+    anim_map_reset();
+    anim_all_view(&v);
+    anim_all_frame(&a, &v, &t, T - 500, T);
+    anim_all_frame(&a, &v, &t, T + 60, T);
+    animated = canvas_diff(&a, &b);
+    printf("anim switch: arrival frame differs from the still plan in %d px\n", animated);
+    CHECK(animated > 200);
+    draw_set_theme(DRAW_THEME_CLASSIC);
+    free(a.px);
+    free(b.px);
+}
+
+/* ---- the handoff crossfade and the person animations on one person ---- */
+
+/* One person 5 m out, x-ray (R2 sees them) or seen (the wearer's phone W sees them too). */
+static void ah_scene(seeker_tracks *t, int seen)
+{
+    memset(t, 0, sizeof *t);
+    add_node(t, "W", "ok", 0, 0, 0);
+    add_node(t, "R2", "ok", -2, 1, 90);
+    seeker_track *k = add_track(t, seen ? "W,R2" : "R2", seen ? "W" : "R2", 1, -0.6f, 5.0f);
+    k->id = 1;
+    k->has_pts = 1;
+    for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+        k->pts[j][0] = SKEL_T[j][0];
+        k->pts[j][1] = SKEL_T[j][1];
+        k->pts[j][2] = 0.9f;
+    }
+}
+
+/* x-ray from s - 1500 ms, seen from s - 100 ms (the flip), every 20 ms up to s. */
+static void ah_run(canvas *c, wv_view *v, int anim, int handoff, int64_t s)
+{
+    static seeker_config cfg;
+    static seeker_tracks t;
+    seeker_config_defaults(&cfg);
+    anim_set_enabled(anim);
+    anim_alert_reset();
+    anim_map_reset();
+    memset(v, 0, sizeof *v);
+    wv_config_defaults(&v->cfg);
+    v->cfg.handoff = handoff;
+    for (int64_t tm = s - 1500; tm <= s; tm += 20) {
+        ah_scene(&t, tm >= s - 100);
+        v->clock_ms = tm;
+        wv_render(c, &cfg, v, &t, 0, NULL);
+    }
+}
+
+static int ah_diff(const canvas *a, const canvas *b, int x0, int y0, int x1, int y1)
+{
+    int n = 0;
+    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < a->h; y++)
+        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < a->w; x++)
+            n += a->px[y * a->stride + x] != b->px[y * b->stride + x];
+    return n;
+}
+
+static void test_anim_handoff(void)
+{
+    /* The fx: a look change mid-intro keeps its hatch sweep and marching, loses its own fades. */
+    const int64_t T = 20000;
+    anim_person_set_enabled(1);
+    anim_person_begin(T, 1.0f);
+    anim_person_track(5, 1);
+    anim_person_end();
+    anim_person_begin(T + 2000, 1.0f);
+    anim_person_track(5, 1);
+    anim_person_end();
+    anim_person_begin(T + 2040, 1.0f);
+    ap_fx f = anim_person_track(5, 0), g = ap_crossfading(f);
+    anim_person_end();
+    CHECK(f.active && f.mark_a < 1.0f && f.hatch < 1.0f && f.march != 0.0f);
+    CHECK(g.active && g.mark_a == 1.0f && g.trace == 1.0f && g.hatch == f.hatch && g.march == f.march);
+    ap_fx o = ap_old_look(0), os = ap_old_look(1);
+    CHECK(o.march == f.march && o.mark_a == 1.0f && o.hatch == 1.0f && !os.active);
+    anim_person_set_enabled(0);
+    CHECK(!ap_old_look(0).active && !ap_crossfading(anim_person_track(5, 0)).active);
+
+    /* Rendered: 331500 ms is a whole number of march periods (test_anim_person), and 100 ms after
+     * the flip the crossfade is at 0.4 while the corner trace would still be open. */
+    enum { W = 640, H = 360 };
+    const int64_t S = 331500;
+    canvas a = { calloc((size_t)W * H, 4), W, H, W }, b = { calloc((size_t)W * H, 4), W, H, W };
+    CHECK(a.px && b.px);
+    if (!a.px || !b.px) {
+        free(a.px);
+        free(b.px);
+        return;
+    }
+    static wv_view v;
+    draw_set_theme(DRAW_THEME_PLAN);
+    ah_run(&b, &v, 0, 1, S);
+    wv_stats off = v.last;
+    ah_run(&a, &v, 1, 1, S);
+    wv_stats on = v.last;
+    CHECK(off.n_drawn == 1 && on.n_drawn == 1 && off.n_fading == 1 && on.n_fading == 1);
+    CHECK(on.drawn[0].direct && on.drawn[0].x == off.drawn[0].x && on.drawn[0].w == off.drawn[0].w);
+    int bx = on.drawn[0].x, by = on.drawn[0].y, bw = on.drawn[0].w, bh = on.drawn[0].h;
+    int d_xfade = ah_diff(&a, &b, bx - 6, by - 6, bx + bw + 6, by + bh + 6);
+    /* --handoff off: no crossfade, so the person animations' own look change plays. */
+    ah_run(&b, &v, 0, 0, S);
+    ah_run(&a, &v, 1, 0, S);
+    CHECK(v.last.n_fading == 0 && v.last.n_drawn == 1);
+    int d_plain = ah_diff(&a, &b, bx - 6, by - 6, bx + bw + 6, by + bh + 6);
+    printf("anim handoff: mid-crossfade box differs anim on vs off in %d px (handoff on), %d px (handoff off)\n",
+           d_xfade, d_plain);
+    CHECK(d_xfade == 0 && d_plain > 50);
+    anim_set_enabled(1);
+    draw_set_theme(DRAW_THEME_CLASSIC);
+    free(a.px);
+    free(b.px);
+}
+
+/* ---- plan map animations (display/anim_map.h) ---- */
+
+static wv_config g_am_wc;
+static wv_pose g_am_pose;
+
+/* The full-screen plan of `marks` at time `t` (0: no clock), wall straight ahead, no phones. */
+static void am_draw(canvas *c, int64_t t, const plan_mark *marks, int n, int walls)
+{
+    anim_map_frame(t);
+    draw_clear(c, P_GROUND);
+    g_am_wc.n_walls = walls;
+    plan_map(c, plan_u(c), 0, 0, c->w, c->h, 40.0f, 0.8f, 0, &g_am_pose, "R1", 66.0f, &g_am_wc, NULL, marks, n);
+}
+
+/* Pixels that differ between a and b inside the box. */
+static int am_diff(const canvas *a, const canvas *b, int x0, int x1, int y0, int y1)
+{
+    int n = 0;
+    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < a->h; y++)
+        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < a->w; x++)
+            n += a->px[y * a->stride + x] != b->px[y * b->stride + x];
+    return n;
+}
+
+static plan_mark am_mark(int id, int kind, float x, float y, int down)
+{
+    plan_mark m;
+    memset(&m, 0, sizeof m);
+    m.id = id;
+    m.kind = kind;
+    m.x = x;
+    m.y = y;
+    m.down = down;
+    m.close = down;
+    return m;
+}
+
+static void test_anim_map(void)
+{
+    const int W = 640, H = 360;
+    canvas a = { calloc((size_t)W * H, 4), W, H, W }, b = { calloc((size_t)W * H, 4), W, H, W };
+    CHECK(a.px && b.px);
+    if (!a.px || !b.px)
+        return;
+    memset(&g_am_wc, 0, sizeof g_am_wc);
+    wv_config_defaults(&g_am_wc);
+    g_am_wc.walls[0][0] = -1.0f; /* 2 m wall 2 m ahead */
+    g_am_wc.walls[0][1] = 2.0f;
+    g_am_wc.walls[0][2] = 1.0f;
+    g_am_wc.walls[0][3] = 2.0f;
+    memset(&g_am_pose, 0, sizeof g_am_pose);
+    const int64_t T = 50000;
+    /* Screen of a room point: wearer at (W/2 - 1, 0.8 H), 40 px per m, heading up (plan.c). */
+#define AM_SX(x) (W / 2 + (int)lroundf((x) * 40.0f))
+#define AM_SY(y) ((int)lroundf(H * 0.8f) - (int)lroundf((y) * 40.0f))
+    CHECK(anim_map_enabled());
+
+    /* Disabled, and enabled with no clock, both draw exactly the unanimated plan, mid-animation. */
+    plan_mark mk[3] = { am_mark(1, PLAN_SEEN, -0.5f, 3.0f, 0), am_mark(2, PLAN_HIDDEN, 0.6f, 3.2f, 0),
+                        am_mark(3, PLAN_SEEN, -4.0f, 1.0f, 1) };
+    anim_map_reset();
+    am_draw(&b, 0, mk, 3, 1); /* reference: no clock */
+    anim_map_set_enabled(0);
+    for (int64_t dt = 0; dt <= 3000; dt += 150) {
+        am_draw(&a, T + dt, mk, 3, 1);
+        CHECK(am_diff(&a, &b, 0, W, 0, H) == 0);
+    }
+    anim_map_set_enabled(1);
+    anim_map_reset();
+    am_draw(&a, 0, mk, 3, 1);
+    CHECK(am_diff(&a, &b, 0, W, 0, H) == 0);
+
+    /* First frame: every marker is there at full strength, the wall is not drawn yet. */
+    anim_map_reset();
+    am_draw(&a, T, mk, 3, 1);
+    int sx = AM_SX(-0.5f), sy = AM_SY(3.0f);
+    CHECK(a.px[sy * W + sx] == P_SEEN && b.px[sy * W + sx] == P_SEEN); /* seen squares: the palette's cyan */
+    int hid_a = count_near_rgb(&a, P_HIDDEN, 90, AM_SX(0.6f) - 4, AM_SX(0.6f) + 5, AM_SY(3.2f) - 4, AM_SY(3.2f) + 5);
+    int hid_b = count_near_rgb(&b, P_HIDDEN, 90, AM_SX(0.6f) - 4, AM_SX(0.6f) + 5, AM_SY(3.2f) - 4, AM_SY(3.2f) + 5);
+    printf("anim map: first frame hidden square %d px (unanimated %d)\n", hid_a, hid_b);
+    CHECK(hid_a > 6 && hid_a * 2 > hid_b);
+    int wall_now = am_diff(&a, &b, AM_SX(-0.8f), AM_SX(0.8f), AM_SY(2.0f) - 2, AM_SY(2.0f) + 3);
+    printf("anim map: first frame, %d wall px still to draw\n", wall_now);
+    CHECK(wall_now > 40);
+    /* Draw-in done by 300 ms: the wall equals the settled plan. */
+    am_draw(&a, T + 320, mk, 3, 1);
+    CHECK(am_diff(&a, &b, AM_SX(-0.8f), AM_SX(0.8f), AM_SY(2.0f) - 2, AM_SY(2.0f) + 3) == 0);
+
+    /* Ping: one person off to the side (outside the cone's scan), no walls. A ring around them
+     * while 0..450 ms old, nothing after; the square itself is drawn every frame. */
+    plan_mark p1 = am_mark(7, PLAN_SEEN, -4.0f, 1.0f, 0);
+    int px = AM_SX(-4.0f), py = AM_SY(1.0f), R = 30;
+    anim_map_reset();
+    am_draw(&b, 0, &p1, 1, 0);
+    am_draw(&a, T - 1000, NULL, 0, 0); /* the map already up, empty */
+    am_draw(&a, T, &p1, 1, 0);
+    CHECK(a.px[py * W + px] == P_SEEN);
+    am_draw(&a, T + 200, &p1, 1, 0);
+    int ring = am_diff(&a, &b, px - R, px + R, py - R, py + R);
+    am_draw(&a, T + 460, &p1, 1, 0);
+    int after = am_diff(&a, &b, px - R, px + R, py - R, py + R);
+    printf("anim map: ping %d px at 200 ms, %d at 460 ms\n", ring, after);
+    CHECK(ring > 20 && after == 0);
+    /* Still on the map a second later: no new ping. */
+    am_draw(&a, T + 1200, &p1, 1, 0);
+    am_draw(&a, T + 1300, &p1, 1, 0);
+    CHECK(am_diff(&a, &b, px - R, px + R, py - R, py + R) == 0);
+    /* Gone over a second, then the id comes back (or is reused): it pings again. */
+    for (int64_t t = T + 1400; t <= T + 2600; t += 100)
+        am_draw(&a, t, NULL, 0, 0);
+    am_draw(&a, T + 2700, &p1, 1, 0);
+    am_draw(&a, T + 2900, &p1, 1, 0);
+    CHECK(am_diff(&a, &b, px - R, px + R, py - R, py + R) > 20);
+    /* A one-frame dropout does not. */
+    am_draw(&a, T + 3500, &p1, 1, 0);
+    am_draw(&a, T + 3600, NULL, 0, 0);
+    am_draw(&a, T + 3700, &p1, 1, 0);
+    CHECK(am_diff(&a, &b, px - R, px + R, py - R, py + R) == 0);
+    /* Untracked (id 0) and the table full of other ids: no crash, a new id still pings. */
+    static plan_mark many[100];
+    for (int i = 0; i < 100; i++)
+        many[i] = am_mark(1000 + i, PLAN_SEEN, 3.0f, 1.0f, 0);
+    am_draw(&a, T + 3800, many, 100, 0);
+    plan_mark p0 = am_mark(0, PLAN_SEEN, -4.0f, 1.0f, 0), p9 = am_mark(9, PLAN_SEEN, -4.0f, 1.0f, 0);
+    am_draw(&a, T + 3900, &p0, 1, 0);
+    am_draw(&a, T + 4000, &p0, 1, 0);
+    CHECK(am_diff(&a, &b, px - R, px + R, py - R, py + R) == 0);
+    am_draw(&a, T + 4100, &p9, 1, 0);
+    am_draw(&a, T + 4300, &p9, 1, 0);
+    CHECK(am_diff(&a, &b, px - R, px + R, py - R, py + R) > 20);
+
+    /* Down: a ring every 1.4 s from going down, quiet in between (frames every 100 ms). */
+    plan_mark d = am_mark(7, PLAN_SEEN, -4.0f, 1.0f, 1);
+    anim_map_reset();
+    am_draw(&b, 0, &d, 1, 0);
+    p1.id = 7;
+    for (int64_t t = T; t < T + 1000; t += 100)
+        am_draw(&a, t, &p1, 1, 0); /* standing first */
+    int pulses = 0, quiets = 0;
+    for (int64_t t = T + 1000; t < T + 1000 + 4 * 1400; t += 100) {
+        am_draw(&a, t, &d, 1, 0);
+        int ph = (int)((t - T - 1000) % 1400), n = am_diff(&a, &b, px - 40, px + 40, py - 40, py + 40);
+        if (ph == 300) {
+            pulses += n > 20;
+            if (t == T + 1300)
+                printf("anim map: down ring %d px at +300 ms\n", n);
+        } else if (ph >= 1000)
+            quiets += n == 0;
+    }
+    CHECK(pulses == 4 && quiets == 4 * 4);
+    /* Up again: no more rings. */
+    for (int64_t t = T + 6600; t <= T + 8000; t += 100)
+        am_draw(&a, t, &p1, 1, 0);
+    memcpy(b.px, a.px, (size_t)W * H * 4);
+    am_draw(&a, T + 8100, &p1, 1, 0);
+    am_draw(&a, T + 8500, &p1, 1, 0);
+    CHECK(am_diff(&a, &b, px - 40, px + 40, py - 40, py + 40) == 0);
+
+    /* Hidden dashes march: the square changes over time, stays the same at the same time. */
+    plan_mark h = am_mark(8, PLAN_HIDDEN, -4.0f, 1.0f, 0);
+    anim_map_reset();
+    am_draw(&a, T, &h, 1, 0);
+    am_draw(&a, T + 1000, &h, 1, 0);
+    am_draw(&b, T + 1200, &h, 1, 0);
+    CHECK(am_diff(&a, &b, px - 8, px + 8, py - 8, py + 8) > 0);
+    am_draw(&a, T + 1200, &h, 1, 0);
+    CHECK(am_diff(&a, &b, 0, W, 0, H) == 0); /* same time, same pixels */
+
+    /* Scan: a faint line inside the cone at some moments, none in the still part of the period. */
+    anim_map_reset();
+    am_draw(&b, 0, NULL, 0, 0);
+    am_draw(&a, T, NULL, 0, 0);
+    int scan_on = 0;
+    for (int64_t t = T + 400; t < T + 2000; t += 100) {
+        am_draw(&a, t, NULL, 0, 0);
+        scan_on += am_diff(&a, &b, 0, W, 0, H) > 30;
+    }
+    am_draw(&a, T + 300 + 3000 - 500, NULL, 0, 0);
+    CHECK(scan_on >= 12 && am_diff(&a, &b, 0, W, 0, H) == 0);
+
+    /* Through hud_render: the full-screen plan's first frame has the person square already. */
+    static seeker_config cfg;
+    seeker_config_defaults(&cfg);
+    static wv_view v;
+    memset(&v, 0, sizeof v);
+    wv_config_defaults(&v.cfg);
+    snprintf(v.cfg.node, sizeof v.cfg.node, "R1");
+    v.cfg.pose_src = WV_POSE_STATIC;
+    v.cfg.radar_fallback = 1;
+    static seeker_tracks t;
+    memset(&t, 0, sizeof t);
+    add_node(&t, "R1", "ok", 0, 0, 0);
+    seeker_track *k = add_track(&t, "R1", "R1", 1, -4.0f, 1.0f); /* off to the side: no scan there */
+    k->id = 5;
+    k->posture = SEEKER_POSTURE_DOWN;
+    hud_state hs;
+    memset(&hs, 0, sizeof hs);
+    hs.t = &t;
+    hs.tracks_age_ms = 10;
+    hs.background = "wearer";
+    hs.view_node = "R1";
+    hs.wearer = &v;
+    hs.video_state = VIDEO_LOST;
+    draw_set_theme(DRAW_THEME_PLAN);
+    anim_map_reset();
+    hs.now_ms = T; /* hud_render hands the frame time to the map animations */
+    hud_render(&a, &cfg, &hs);
+    float u = plan_u(&a);
+    int m24 = (int)lroundf(24 * u), hh = H - 2 * m24 - plan_title_h(u) - (int)lroundf(16 * u);
+    float ppm = ((float)hh * 0.72f - 40 * u) / 6.0f, fay = (float)m24 + (float)(int)lroundf((float)hh * 0.72f);
+    int qx = W / 2 + (int)lroundf(-4.0f * ppm), qy = (int)lroundf(fay - 1.0f * ppm);
+    CHECK(count_rgb(&a, P_RED, qx - 3, qx + 3, qy - 3, qy + 3) > 4); /* down: red, first frame */
+    for (int64_t t = T + 100; t <= T + 1200; t += 100) {
+        if (t == T + 1200)
+            memcpy(b.px, a.px, (size_t)W * H * 4); /* T + 1100: between rings */
+        hs.now_ms = t;
+        hud_render(&a, &cfg, &hs);
+    }
+    CHECK(am_diff(&a, &b, qx - 30, qx + 30, qy - 30, qy + 30) == 0);
+    for (int64_t t = T + 1300; t <= T + 1700; t += 100) {
+        hs.now_ms = t;
+        hud_render(&a, &cfg, &hs);
+    }
+    int hr = am_diff(&a, &b, qx - 30, qx + 30, qy - 30, qy + 30); /* T + 1700: second ring */
+    printf("anim map: hud_render down ring %d px\n", hr);
+    CHECK(hr > 20);
+    draw_set_theme(DRAW_THEME_CLASSIC);
+#undef AM_SX
+#undef AM_SY
+    anim_map_reset();
+    free(a.px);
+    free(b.px);
 }
 
 /* ---- threat colour hysteresis (common/seeker_colour.h) ---- */
@@ -4719,6 +5727,11 @@ int main(void)
     test_skel_render();
     test_plan_primitives();
     test_plan_render();
+    test_anim_alert();
+    test_anim_person();
+    test_anim_map();
+    test_anim_switch();
+    test_anim_handoff();
     test_colour_hysteresis();
     test_posture();
     test_calibration_and_freeze();

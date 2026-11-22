@@ -94,6 +94,8 @@ typedef struct {
     int shown;        /* drawn before: a change of look crossfades */
     int shown_direct; /* drawn as seen (with the WV_SEEN_HOLD_MS hold) */
     int64_t direct_ms, xfade_ms; /* last frame the wearer's phone saw them; start of the crossfade */
+    int plate_valid;  /* plan theme, animations on: where this person's plate was drawn, so a plate */
+    float plate_x, plate_y; /* that has to move (layout changed) glides there instead of jumping */
 } wv_colour_slot;
 
 /* Handoff between x-ray and seen (wv_config.handoff). The wearer's phone misses a person now and

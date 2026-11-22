@@ -415,30 +415,81 @@ bearing, which is what happened with the stale `-3.0,5.5,104` pose. With the tag
 `hud_display` draws the **plan** theme by default: a building drawing laid over the camera, in
 Atkinson Hyperlegible type (compiled in, `third_party/atkinson`). The "Box colours" table below
 describes the **classic** look (5x7 capitals, brackets, red / amber / green / cyan), still one flag
-away:
+away.
+
+Plan colours are cool only, because warm colours vanish against flames and orange glow:
+**cyan** `#22E4FF` for a person R1 sees, **green** `#3BFF9E` for someone behind a wall, **magenta**
+`#FF3DD0` for every alert (close, coming closer, person down, video late, warning plates, the map's
+alert squares). Every person stroke (frames, ticks, leaders, skeletons, hulls, chevrons, map marks)
+sits on a dark halo (black at 65%, 3 px wider, dashes included) so it reads on bright fire and dark
+smoke alike. Plates keep their dark fill and near-white text. The tokens live in one place,
+`display/plan.h` (`P_SEEN`, `P_HIDDEN`, `P_ALERT`, `P_HALO*`).
 
 ```sh
 build/hud_display ... --theme classic     # or "theme": "classic" in the config's display object
 cd ~/seeker/drafts/pi-lane && THEME=classic sh scripts/run-live.sh   # or HUD_ARGS="--theme classic"
+build/hud_display ... --anim off          # still plan theme; or "anim": false in the display object
+cd ~/seeker/drafts/pi-lane && ANIM=off sh scripts/run-live.sh
 ```
+
+The plan theme animates by default (state changes, people arriving and leaving, the map); all of
+it is decoration on one switch, `--anim on|off` (`display.anim`, `ANIM=` in `run-live.sh`), and off
+draws the still plan theme exactly. The classic theme never animates. Every animation runs on one
+timestamp per frame, `hud_state.now_ms`, which `hud_render` hands to all three modules.
 
 | Plan theme shows | Means |
 | --- | --- |
-| Solid rectangle with short ticks on its left and right sides, leader to a plate "Person" / "3.4 m" | R1's own camera sees the person; the distance is from the wearer. Posture (#28) in plain words: "3.4 m, crouching"; standing and unknown say nothing |
-| The same in **red**, plate hatched red, "1.4 m, coming closer" (or "1.4 m, close") | Close: the classic RED rule (under `colours.near_m`, or approaching faster than `colours.closing_mps`) |
-| Red frame, red-hatched plate "Person down" / "6.6 m" | Posture DOWN, at any distance: the most important state, drawn like close |
-| Pale yellow dashed outline, light hatch, dashed skeleton with square joints and a dashed head, plate "Behind wall" / "4.7 m, seen by R2" | R1 does not see the person, R2 does, and a configured wall is between R1 and them ("Out of sight" when no wall is in the way). A dashed cross instead of the skeleton: no landmarks (`pts`) for that person |
-| The same ghost lying down (lifted to the bottom of the view when the floor is out of sight), red-hatched plate "Behind wall, person down" / "2.1 m, seen by R2" | Posture DOWN behind a wall: the plate goes red, the ghost stays in the hidden colour |
+| Cyan solid rectangle with short ticks on its left and right sides, leader to a cyan-edged plate "Person" / "3.4 m" | R1's own camera sees the person; the distance is from the wearer. Posture (#28) in plain words: "3.4 m, crouching"; standing and unknown say nothing |
+| The same in **magenta**, plate hatched magenta, "1.4 m, coming closer" (or "1.4 m, close") | Close: the classic RED rule (under `colours.near_m`, or approaching faster than `colours.closing_mps`) |
+| Magenta frame, magenta-hatched plate "Person down" / "6.6 m" | Posture DOWN, at any distance: the most important state, drawn like close |
+| Green dashed outline, light hatch, dashed skeleton with square joints and a dashed head, plate "Behind wall" / "4.7 m, seen by R2" | R1 does not see the person, R2 does, and a configured wall is between R1 and them ("Out of sight" when no wall is in the way). A dashed cross instead of the skeleton: no landmarks (`pts`) for that person |
+| The same ghost lying down (lifted to the bottom of the view when the floor is out of sight), magenta-hatched plate "Behind wall, person down" / "2.1 m, seen by R2" | Posture DOWN behind a wall: the plate goes magenta, the ghost stays green |
 | Chevron at the screen edge with a plate "4.9 m, 41° right" | Outside R1's view (solid for seen, dashed for behind a wall), ", behind you" past 90 deg |
-| Title block bottom left: Camera / Eyes / Position / Time (+ Delay) | "R1 live", "Video 1.2 s late" (cell hatched red, also through a frozen VIDEO LOST), "Camera paused" (map fallback); the other phones and their rates; Fixed / Live / Held / Compass (no tag, compass yaw) / Easing home / Starting; the Pi's clock; with `SEEKER_LAT=1` a Delay cell, the camera to HUD median ("140 ms") |
-| Plan bottom right (full screen when the camera is paused) | Heading up, the wearer as a triangle at its real pose (full screen: fusion's `wearer_node`, as the classic radar), R1's view cone dashed, walls hatched, R2 as a circle with its cone, seen people as solid squares, people behind walls as dashed squares, red when close or down. 0 1 2 m scale bar |
-| Plate at the top | What is wrong: "Camera paused, showing plan" or "Video lost, last picture shown" with the reason, "Fusion lost", "R2 lost", "R1 position held", "R1 on compass", "R1 easing home" |
+| Title block bottom left: Camera / Eyes / Position / Time (+ Delay) | "R1 live", "Video 1.2 s late" (cell hatched magenta, also through a frozen VIDEO LOST), "Camera paused" (map fallback); the other phones and their rates; Fixed / Live / Held / Compass (no tag, compass yaw) / Easing home / Starting; the Pi's clock; with `SEEKER_LAT=1` a Delay cell, the camera to HUD median ("140 ms") |
+| Plan bottom right (full screen when the camera is paused) | Heading up, the wearer as a triangle at its real pose (full screen: fusion's `wearer_node`, as the classic radar), R1's view cone dashed, walls hatched, R2 as a green circle with its cone, seen people as cyan squares, people behind walls as green dashed squares, magenta when close or down. 0 1 2 m scale bar |
+| Magenta-edged plate at the top | What is wrong: "Camera paused, showing plan" or "Video lost, last picture shown" with the reason, "Fusion lost", "R2 lost", "R1 position held", "R1 on compass", "R1 easing home" |
+
+State changes are animated (`display/anim_alert.c`), decoration only: a state that turns true is
+drawn in full on that frame, and nobody's drawn position or size is eased beyond fusion and the
+box smoothing. Entering an alert, the frame, plate edge and words turn magenta at once and the
+plate hatch sweeps in from the bottom-left corner (from 20%, full by 200 ms). Person down (in view,
+or behind a wall on the ghost's hull) adds one ring ping out from the frame (500 ms), then a calm
+breathing pulse of the frame (1.2 s, alpha 70% to 100%). Leaving an alert, the colours blend back
+over 200 ms. A title block cell whose words change crossfades over 150 ms (the new value starts at
+60%); a change of digits only (the clock, "1.2 s late", fps) swaps at once. Warning plates slide 8
+px in from above while fading in (150 ms) and leave the same way. Everything runs on one timestamp
+per frame (`hud_state.now_ms`), so `hud_shot --alert-seq DIR` renders any moment; `now_ms` 0 or
+`--anim off` gives the still plan look exactly.
 
 Stale people are drawn faded rather than grey. The theme only changes drawing: tracking, the
 colour hysteresis and the fallback rules are the same as classic.
+
+Person arrivals and losses are animated in the plan camera view (display/anim_person.c), as
+decoration only: a person's frame or ghost is always drawn where they are on that frame. A new
+seen person: the whole frame shows faintly at once and its corners trace closed (180 ms), then the
+leader draws out (120 ms), then the plate fades and slides in (120 ms). A new person behind a wall:
+the ghost starts at 60% and is full in 150 ms, the hull hatch sweeps in from the bottom left
+(220 ms), then leader and plate. A person no longer drawn leaves a fading echo of their last frame or
+ghost for 220 ms (50% to 0, no plate). Hidden-person dashes march slowly (12 px/s). Someone who
+comes back within 2 s keeps their plate up. Words and distances are never animated.
+A person who changes look (x-ray ghost to seen box or back) is the handoff's job: with the handoff
+on, its 250 ms crossfade alone sets the opacity of both looks, so the ghost's 60% start and the
+corner trace are not played on top of it (no double fade); the hatch sweep, the marching dashes and
+the halos still style the looks while they dissolve, and the alert ring goes with the new look
+only. With `--handoff off` there is no crossfade and the look change plays the person animation
+(trace or ghost fade) instead. `--anim off` leaves exactly the handoff crossfade.
+`tools/hud_shot --person-seq appear|xray|lost|all` renders the animations frame by frame (`--perf`
+times them); the stills are drawn settled.
+
+The plan map animates too (display/anim_map.c, the corner inset and the full-screen plan), never a
+position: someone new on the map gets one ring ping from their square (450 ms); someone down a slow
+ring every 1.4 s; a faint scan line sweeps the wearer's view cone every 3 s; hidden people's dashed
+squares march round; and on first show cones, walls and the scale bar draw in over 300 ms.
+`tools/hud_anim_map_shot` renders map sequences (`tools/anim_map_media.sh` makes media).
 `tools/hud_shot` renders both themes of a made-up scene on a laptop (no phones, no Pi):
 `python3 tools/hud_shot_room.py room.png` then convert it to PPM and run
-`build/hud_shot --bg room.ppm --out shots/`.
+`build/hud_shot --bg room.ppm --out shots/` (`--alert-seq DIR`, `--person-seq NAME` and `--demo DIR`
+for the animations; `--demo` is all of them in one 7.5 s sequence).
 
 ### Box colours (wearer view)
 

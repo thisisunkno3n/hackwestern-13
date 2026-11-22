@@ -13,6 +13,28 @@
  * person behind the wall lying, posture down). Writes plan-<state>.png and classic-normal.png (--classic-all: every state
  * for classic too, for the pixel check against main). Built with -DHUD_SHOT_CLASSIC_ONLY it
  * renders classic only (it then compiles against older trees without the plan theme).
+ *
+ * --demo DIR renders all three plan animation modules in one 7.5 s story from the frames and
+ * timeline tools/hud_demo_frames.py writes to DIR (DIR/out/f000.png ..., plus the cost per frame
+ * with the animations on and off).
+ *
+ * --alert-seq DIR renders the plan theme's alert animations (display/anim_alert.h) instead: six
+ * sequences, one PNG every 33 ms in DIR/<name>/f000.png..., driven only by hud_state.now_ms, so
+ * every frame is a chosen moment: close (someone walks in fast, then back out), down (the seen
+ * person goes down, gets up at 3 s), down-behind-wall (the same behind the wall), video-late (the
+ * video stalls 1.5 s), title-change (R2 lost for 1.2 s: Eyes cell and the "R2 lost" plate),
+ * warning (R1 position held for 1.2 s: the top-left plate and the Position cell). Each sequence
+ * is rendered again with the animations off and the per-frame cost of both is printed.
+ *
+ *   build/hud_shot --bg room.ppm --out frames/ --person-seq appear|xray|lost|all [--t0 -100] [--t1 700]
+ *                  [--dt 20] [--perf]
+ *
+ * --person-seq renders the person animations (display/anim_person.h) of the normal scene instead of the
+ * stills, one PNG per frame, <name>-NNN.png, at t = t0, t0 + dt, ... t1 ms around the event at
+ * t = 0: appear (the seen person arrives), xray (the person behind the wall arrives), lost (the
+ * seen person goes at 0, the one behind the wall at 120). --perf also times a frame with both
+ * people mid-arrival and settled, animations on and off. The stills render with the animations
+ * off (the settled look).
  */
 
 #include "draw.h"
@@ -39,6 +61,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#ifndef HUD_SHOT_CLASSIC_ONLY
+#include "anim.h"
+#endif
 
 static uint32_t *load_ppm(const char *path, int *w, int *h)
 {
@@ -172,21 +199,534 @@ static void person_box(float x, float y, float box[4])
     box[3] = h;
 }
 
+#ifndef HUD_SHOT_CLASSIC_ONLY
+/* ---- --seq: alert animation sequences ---- */
+
+typedef struct {
+    seeker_tracks t;
+    wv_view v;
+    hud_state hs;
+    seeker_track *seen, *hid;
+} seq_scene;
+
+static void seq_setup(seq_scene *sc, video_frame *f, seeker_health_table *health, uint32_t *bg)
+{
+    memset(sc, 0, sizeof *sc);
+    seeker_tracks *t = &sc->t;
+    add_node(t, "R1", 0, -2, 0, 15);
+    add_node(t, "R2", 3.6f, 2.6f, -90, 28);
+    sc->seen = add_track(t, 1, "R1", -1.3f, 2.3f, "amber");
+    sc->seen->has_node_box = 1;
+    person_box(sc->seen->room_x_m, sc->seen->room_y_m, sc->seen->node_box);
+    sc->hid = add_track(t, 2, "R2", 1.1f, 2.6f, "cyan");
+    sc->hid->has_pts = 1;
+    for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+        sc->hid->pts[j][0] = POSE[j][0];
+        sc->hid->pts[j][1] = POSE[j][1];
+        sc->hid->pts[j][2] = 0.9f;
+    }
+    wv_view *v = &sc->v;
+    wv_config_defaults(&v->cfg);
+    snprintf(v->cfg.node, sizeof v->cfg.node, "R1");
+    v->cfg.pose.x_m = 0;
+    v->cfg.pose.y_m = -2;
+    v->cfg.pose_src = WV_POSE_STATIC;
+    v->cfg.n_walls = 1;
+    v->cfg.walls[0][0] = 0.3f;
+    v->cfg.walls[0][1] = 0;
+    v->cfg.walls[0][2] = 2.5f;
+    v->cfg.walls[0][3] = 0;
+    v->cfg.radar_fallback = 1;
+    v->cfg.from_config = 1;
+    hud_state *hs = &sc->hs;
+    hs->t = t;
+    hs->tracks_age_ms = 14;
+    hs->health = health;
+    hs->fps = 30;
+    hs->background = "wearer";
+    hs->view_node = "R1";
+    hs->video = f;
+    hs->video_fps = 15;
+    hs->wearer = v;
+    hs->video_state = VIDEO_OK;
+    hs->video_why = VIDEO_WHY_OK;
+    f->px = bg;
+}
+
+static void seq_lie(seeker_track *k, int down)
+{
+    k->posture = down ? SEEKER_POSTURE_DOWN : SEEKER_POSTURE_UNKNOWN;
+    for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+        k->pts[j][0] = down ? POSE[j][1] : POSE[j][0];
+        k->pts[j][1] = down ? -POSE[j][0] * 0.4f : POSE[j][1];
+    }
+}
+
+static float lerpf(float a, float b, float t)
+{
+    return a + (b - a) * (t < 0 ? 0 : t > 1 ? 1 : t);
+}
+
+/* The scene at time t (ms from the start) of sequence `which`. */
+static void seq_at(int which, seq_scene *sc, video_frame *f, int t, uint32_t *vid_far, uint32_t *vid_down)
+{
+    seeker_track *seen = sc->seen, *hid = sc->hid;
+    f->px = vid_far;
+    f->t_rx_ms = seeker_now_ms() - 30;
+    sc->hs.video_state = VIDEO_OK;
+    switch (which) {
+    case 0: /* close: 1 m/s in from 2.4 m to 1.4 m, hold, back out to 3.4 m */
+        seen->room_x_m = -0.35f;
+        seen->room_y_m = t < 1700 ? lerpf(0.4f, -0.6f, (t - 300) / 800.0f) : lerpf(-0.6f, 1.4f, (t - 1700) / 400.0f);
+        person_box(seen->room_x_m, seen->room_y_m, seen->node_box);
+        break;
+    case 1: /* down in view */
+        f->px = vid_down;
+        seen->room_x_m = -1.0f;
+        seen->room_y_m = 4.5f;
+        if (t >= 300 && t < 3000) {
+            seen->posture = SEEKER_POSTURE_DOWN;
+            lying_box(seen->room_x_m, seen->room_y_m, seen->node_box);
+        } else {
+            seen->posture = SEEKER_POSTURE_UNKNOWN;
+            person_box(seen->room_x_m, seen->room_y_m, seen->node_box);
+        }
+        break;
+    case 2: /* down behind the wall */
+        seq_lie(hid, t >= 300 && t < 3000);
+        break;
+    case 3: /* video stalls for 1.5 s */
+        if (t >= 300 && t < 1800) {
+            sc->hs.video_state = VIDEO_STALE;
+            f->t_rx_ms = seeker_now_ms() - (500 + (t - 300));
+        }
+        break;
+    case 4: /* R2 lost for 1.2 s */
+        snprintf(sc->t.nodes[1].state, sizeof sc->t.nodes[1].state, "%s", t >= 300 && t < 1500 ? "lost" : "ok");
+        break;
+    case 5: /* R1 loses its marker for 1.2 s: position held */
+        sc->v.cfg.pose_src = WV_POSE_FUSION;
+        snprintf(sc->t.nodes[0].pose_src, sizeof sc->t.nodes[0].pose_src, "%s",
+                 t >= 300 && t < 1500 ? "held" : "cli");
+        break;
+    }
+}
+
+static double now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e6 + (double)ts.tv_nsec / 1e3;
+}
+
+/* The module's own cost on its worst frame, every effect at once at 1280x720 scale: a plate
+ * mid hatch sweep, a person-down ring around a big frame, the pulsing hull outline and its ring,
+ * a title cell crossfading, the late hatch sweeping, a warning plate sliding in and one sliding
+ * out. Min over 200 runs of the hooks alone, minus the plain plan drawing of the same plate,
+ * cell and warning plate. */
+static void bench_module(canvas *cv)
+{
+    float u = plan_u(cv);
+    plan_line l[2] = { { "Person down", DRAW_FONT_SANS_SEMIBOLD, 19, P_ALERT, 255 },
+                       { "1.4 m, coming closer", DRAW_FONT_MONO, 15, P_ALERT, 255 } };
+    plan_line w2[2] = { { "R1 position held", DRAW_FONT_SANS_SEMIBOLD, 19, P_INK, 255 },
+                        { "phone lost its marker", DRAW_FONT_MONO, 15, P_INK, P_INK2_A } };
+    plan_line w3[1] = { { "R2 lost", DRAW_FONT_SANS_SEMIBOLD, 19, P_ALERT, 255 } };
+    draw_poly_style hs = { 0 };
+    hs.hatch = P_ALERT;
+    hs.hatch_a = 77;
+    hs.hatch_gap = 9 * u;
+    hs.hatch_w = 2 * u;
+    double best[2] = { 1e18, 1e18 };
+    for (int pass = 0; pass < 2; pass++) /* 0: animated hooks, 1: the plain drawing they replace */
+        for (int rep = 0; rep < 200; rep++) {
+            anim_alert_reset();
+            anim_alert_set_enabled(pass == 0);
+            anim_alert_frame(1000);
+            anim_alert_track(1, 0, 0);
+            anim_alert_track(2, 0, 0);
+            anim_alert_cell(cv, 0, 40, 670, (int)lroundf(15 * u), P_INK, "R1 live", 24, 642, 160, 54);
+            anim_alert_late(0, &(float){ 0 }, &(float){ 0 });
+            anim_alert_warn(cv, u, 400, 24, w3, 1, P_ALERT);
+            anim_alert_warn_flush(cv, u);
+            anim_alert_frame(1100);
+            double t0 = now_us();
+            anim_fx f1 = anim_alert_track(1, 1, 1), f2 = anim_alert_track(2, 1, 1);
+            anim_alert_ring(cv, u, &f1, 200, 200, 420, 480);
+            anim_alert_hull(cv, u, &f2, 700, 420, 420, 200);
+            anim_alert_plate(cv, u, 660, 300, l, 2, P_ALERT, 1, &f1);
+            anim_alert_cell(cv, 0, 40, 670, (int)lroundf(15 * u), P_ALERT, "Video 1.2 s late", 24, 642, 200, 54);
+            float sw, k;
+            if (anim_alert_late(1, &sw, &k))
+                anim_alert_hatch_rect(cv, 24, 642, 200, 54, 0, &hs, sw, k);
+            anim_alert_warn(cv, u, 24, 24, w2, 2, P_ALERT);
+            anim_alert_warn_flush(cv, u); /* "R2 lost" sliding out */
+            double d = now_us() - t0;
+            if (d < best[pass])
+                best[pass] = d;
+        }
+    anim_alert_set_enabled(1);
+    anim_alert_reset();
+    printf("module worst frame: hooks %.1f us, plain drawing they replace %.1f us, animation cost %.1f us\n",
+           best[0], best[1], best[0] - best[1]);
+}
+
+static int run_seq(const char *dir, canvas *cv, seeker_config *cfg, seeker_health_table *health, video_frame *f,
+                   uint32_t *vid_far, uint32_t *vid_down)
+{
+    static const char *const names[] = { "close", "down", "down-behind-wall", "video-late", "title-change",
+                                         "warning" };
+    static const int dur[] = { 2400, 3600, 3600, 2600, 2600, 2400 };
+    static seq_scene sc;
+    static double cost[2][256];
+    draw_set_theme(DRAW_THEME_PLAN);
+    draw_ui_init(cv->h);
+    mkdir(dir, 0755);
+    for (int q = 0; q < 6; q++) {
+        char sub[512];
+        snprintf(sub, sizeof sub, "%s/%s", dir, names[q]);
+        mkdir(sub, 0755);
+        int nf = dur[q] / 33 + 1;
+        if (nf > 256)
+            nf = 256;
+        for (int pass = 0; pass < 2; pass++) { /* animations on (frames written), then off */
+            anim_alert_set_enabled(pass == 0);
+            anim_alert_reset();
+            seq_setup(&sc, f, health, vid_far);
+            for (int k = 0; k < nf; k++) {
+                int t = k * 33;
+                seq_at(q, &sc, f, t, vid_far, vid_down);
+                for (int i = 0; i < 3; i++)
+                    health->slot[i].last_beat_ms = seeker_now_ms();
+                sc.hs.now_ms = 100000 + t;
+                sc.v.clock_ms = 100000 + t;
+                double best = 1e18;
+                for (int rep = 0; rep < 5; rep++) { /* min of 5: the same moment, idempotent */
+                    double t0 = now_us();
+                    hud_render(cv, cfg, &sc.hs);
+                    double d = now_us() - t0;
+                    if (d < best)
+                        best = d;
+                }
+                cost[pass][k] = best;
+                if (pass == 0) {
+                    char name[600];
+                    snprintf(name, sizeof name, "%s/f%03d", names[q], k);
+                    if (write_png(dir, name, cv) != 0)
+                        return 1;
+                }
+            }
+        }
+        anim_alert_set_enabled(1);
+        double on = 0, off = 0, worst = -1e18;
+        for (int k = 0; k < nf; k++) {
+            on += cost[0][k];
+            off += cost[1][k];
+            if (cost[0][k] - cost[1][k] > worst)
+                worst = cost[0][k] - cost[1][k];
+        }
+        printf("seq %-17s %3d frames  anim on %7.1f us  off %7.1f us  diff %6.1f us (max frame diff %6.1f us)\n",
+               names[q], nf, on / nf, off / nf, (on - off) / nf, worst);
+    }
+    bench_module(cv);
+    return 0;
+}
+#endif
+
+#ifndef HUD_SHOT_CLASSIC_ONLY
+/* ---- --person-seq: person animations (display/anim_person.h) ---- */
+
+/* The normal state's scene with the seen person (id 1) and the one behind the wall (id 2) each
+ * present or not. */
+static void ps_scene(seeker_tracks *t, int seen_on, int hid_on)
+{
+    memset(t, 0, sizeof *t);
+    add_node(t, "R1", 0, -2, 0, 15);
+    add_node(t, "R2", 3.6f, 2.6f, -90, 28);
+    if (seen_on) {
+        seeker_track *seen = add_track(t, 1, "R1", -1.3f, 2.3f, "amber");
+        seen->has_node_box = 1;
+        person_box(seen->room_x_m, seen->room_y_m, seen->node_box);
+    }
+    if (hid_on) {
+        seeker_track *hid = add_track(t, 2, "R2", 1.1f, 2.6f, "cyan");
+        hid->has_pts = 1;
+        for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+            hid->pts[j][0] = POSE[j][0];
+            hid->pts[j][1] = POSE[j][1];
+            hid->pts[j][2] = 0.9f;
+        }
+    }
+}
+
+static void ps_view(wv_view *v)
+{
+    memset(v, 0, sizeof *v);
+    wv_config_defaults(&v->cfg);
+    snprintf(v->cfg.node, sizeof v->cfg.node, "R1");
+    v->cfg.pose.y_m = -2;
+    v->cfg.pose_src = WV_POSE_STATIC;
+    v->cfg.n_walls = 1;
+    v->cfg.walls[0][0] = 0.3f;
+    v->cfg.walls[0][2] = 2.5f;
+    v->cfg.radar_fallback = 1;
+    v->cfg.from_config = 1;
+}
+
+/* Who is in the scene at t ms for sequence `seq` (0 appear, 1 xray, 2 lost, 3 both arrive). */
+static void ps_who(int seq, int t, int *seen_on, int *hid_on)
+{
+    *seen_on = seq == 0 ? t >= 0 : seq == 2 ? t < 0 : seq == 3 ? t >= 0 : 1;
+    *hid_on = seq == 1 ? t >= 0 : seq == 2 ? t < 120 : seq == 3 ? t >= 0 : 1;
+}
+
+static void ps_frame(canvas *cv, const seeker_config *cfg, hud_state *hs, video_frame *f, seeker_tracks *t,
+                      wv_view *v, int seq, int tm, seeker_health_table *health)
+{
+    int a, b;
+    ps_who(seq, tm, &a, &b);
+    ps_scene(t, a, b);
+    hs->now_ms = v->clock_ms = 100000 + tm; /* one frame time for every module */
+    f->t_rx_ms = seeker_now_ms();
+    for (int i = 0; i < 3; i++)
+        health->slot[i].last_beat_ms = seeker_now_ms();
+    hud_render(cv, cfg, hs);
+}
+
+static int ps_run(const char *which, int t0, int t1, int dt, int perf, const char *out, canvas *cv,
+                   const seeker_config *cfg, video_frame *f, uint32_t *vid, seeker_health_table *health)
+{
+    static const char *const names[] = { "appear", "xray", "lost" };
+    draw_set_theme(DRAW_THEME_PLAN);
+    draw_ui_init(cv->h);
+    static seeker_tracks t;
+    static wv_view v;
+    hud_state hs;
+    memset(&hs, 0, sizeof hs);
+    hs.t = &t;
+    hs.tracks_age_ms = 14;
+    hs.health = health;
+    hs.fps = 30;
+    hs.background = "wearer";
+    hs.view_node = "R1";
+    hs.video = f;
+    hs.video_fps = 15;
+    hs.wearer = &v;
+    hs.video_state = VIDEO_OK;
+    hs.video_why = VIDEO_WHY_OK;
+    f->px = vid;
+    if (dt <= 0)
+        dt = 20;
+    for (int sq = 0; sq < 3; sq++) {
+        if (strcmp(which, "all") != 0 && strcmp(which, names[sq]) != 0)
+            continue;
+        ps_view(&v);
+        anim_person_set_enabled(1);
+        anim_person_reset();
+        for (int tm = -1500; tm < t0; tm += 33) /* pre-roll: easing and earlier arrivals settle */
+            ps_frame(cv, cfg, &hs, f, &t, &v, sq, tm, health);
+        int nf = 0;
+        for (int tm = t0; tm <= t1; tm += dt, nf++) {
+            ps_frame(cv, cfg, &hs, f, &t, &v, sq, tm, health);
+            char name[64];
+            snprintf(name, sizeof name, "%s-%03d", names[sq], nf);
+            if (write_png(out, name, cv))
+                return 1;
+        }
+        printf("seq %-7s %d frames, t %d..%d ms every %d ms\n", names[sq], nf, t0, t1, dt);
+    }
+    if (perf) {
+        const int reps = 500;
+        int at[5] = { 0, 100, 250, 350, 2000 }; /* trace, trace and hatch, leader, plate, settled */
+        for (int m = 0; m < 5; m++) {
+            double ms[2];
+            for (int on = 1; on >= 0; on--) {
+                ps_view(&v);
+                anim_person_set_enabled(on);
+                for (int tm = -1500; tm < at[m]; tm += 33)
+                    ps_frame(cv, cfg, &hs, f, &t, &v, 3, tm, health);
+                int64_t s0 = seeker_now_ms();
+                for (int k = 0; k < reps; k++)
+                    ps_frame(cv, cfg, &hs, f, &t, &v, 3, at[m], health);
+                ms[on] = (double)(seeker_now_ms() - s0) / reps;
+            }
+            printf("perf both people at t %4d ms: anim on %.3f ms, off %.3f ms per frame, animation %+.3f ms\n",
+                   at[m], ms[1], ms[0], ms[1] - ms[0]);
+        }
+        anim_person_set_enabled(1);
+    }
+    return 0;
+}
+#endif
+
+#ifndef HUD_SHOT_CLASSIC_ONLY
+/* ---- --demo DIR: the three plan animation modules in one sequence ----
+ * DIR holds scene.txt and f000.ppm ... from tools/hud_demo_frames.py (the camera frames and the
+ * timeline). Every frame is one hud_render at hud_state.now_ms = start + t, so all three modules
+ * run on the same clock exactly as on the Pi. Writes DIR/out/f000.png ..., then renders the whole
+ * sequence again with the animations off and prints the per-frame cost of both. */
+static int run_demo(const char *dir, canvas *cv, seeker_config *cfg, seeker_health_table *health,
+                    video_frame *f)
+{
+    char path[600];
+    snprintf(path, sizeof path, "%s/scene.txt", dir);
+    FILE *sc = fopen(path, "r");
+    if (!sc) {
+        fprintf(stderr, "cannot read %s (run tools/hud_demo_frames.py %s first)\n", path, dir);
+        return 1;
+    }
+    enum { MAXF = 600 };
+    static int tm[MAXF], seen[MAXF], hid[MAXF], down[MAXF];
+    static float sx[MAXF], sy[MAXF];
+    int nf = 0;
+    while (nf < MAXF &&
+           fscanf(sc, "%d %d %f %f %d %d", &tm[nf], &seen[nf], &sx[nf], &sy[nf], &hid[nf], &down[nf]) == 6)
+        nf++;
+    fclose(sc);
+    char outdir[600];
+    snprintf(outdir, sizeof outdir, "%s/out", dir);
+    mkdir(outdir, 0755);
+    draw_set_theme(DRAW_THEME_PLAN);
+    draw_ui_init(cv->h);
+    uint32_t *vid = malloc((size_t)cv->w * (size_t)cv->h * 4);
+    if (!vid)
+        return 1;
+    /* Pass 0 writes the frames (animations on). Then three timed runs each with the animations on
+     * and off; each frame keeps its fastest time, so scheduler noise does not count as cost. */
+    static double best[2][MAXF];
+    for (int i = 0; i < nf; i++)
+        best[0][i] = best[1][i] = 1e9;
+    for (int pass = 0; pass < 7; pass++) {
+        int on = pass == 0 || (pass - 1) % 2 == 0, slot = on ? 0 : 1;
+        anim_set_enabled(on);
+        anim_alert_reset();
+        anim_person_reset();
+        anim_map_reset();
+        static wv_view v;
+        memset(&v, 0, sizeof v);
+        wv_config_defaults(&v.cfg);
+        snprintf(v.cfg.node, sizeof v.cfg.node, "R1");
+        v.cfg.pose.y_m = -2;
+        v.cfg.pose_src = WV_POSE_STATIC;
+        v.cfg.n_walls = 1;
+        v.cfg.walls[0][0] = 0.3f;
+        v.cfg.walls[0][2] = 2.5f;
+        v.cfg.radar_fallback = 1;
+        v.cfg.from_config = 1;
+        for (int i = 0; i < nf; i++) {
+            int bw = 0, bh = 0;
+            snprintf(path, sizeof path, "%s/f%03d.ppm", dir, i);
+            uint32_t *src = load_ppm(path, &bw, &bh);
+            if (!src) {
+                fprintf(stderr, "cannot read %s\n", path);
+                free(vid);
+                return 1;
+            }
+            uint32_t *sc2 = scale_to(src, bw, bh, cv->w, cv->h);
+            memcpy(vid, sc2, (size_t)cv->w * (size_t)cv->h * 4);
+            free(sc2);
+            free(src);
+            static seeker_tracks t;
+            memset(&t, 0, sizeof t);
+            add_node(&t, "R1", 0, -2, 0, 15);
+            add_node(&t, "R2", 3.6f, 2.6f, -90, 28);
+            if (seen[i]) {
+                seeker_track *k = add_track(&t, 1, "R1", sx[i], sy[i], "amber");
+                k->has_node_box = 1;
+                person_box(k->room_x_m, k->room_y_m, k->node_box);
+            }
+            if (hid[i]) {
+                /* Behind the wall, far enough that lying down stays clear of the plan inset. */
+                seeker_track *k = add_track(&t, 2, "R2", 1.0f, 3.6f, "cyan");
+                k->has_pts = 1;
+                k->posture = down[i] ? SEEKER_POSTURE_DOWN : SEEKER_POSTURE_STAND;
+                for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+                    k->pts[j][0] = down[i] ? POSE[j][1] : POSE[j][0]; /* lying: head to the left */
+                    k->pts[j][1] = down[i] ? -POSE[j][0] * 0.4f : POSE[j][1];
+                    k->pts[j][2] = 0.9f;
+                }
+            }
+            f->px = vid;
+            f->t_rx_ms = seeker_now_ms();
+            for (int h = 0; h < 3; h++)
+                health->slot[h].last_beat_ms = seeker_now_ms();
+            hud_state hs;
+            memset(&hs, 0, sizeof hs);
+            hs.t = &t;
+            hs.tracks_age_ms = 14;
+            hs.health = health;
+            hs.fps = 30;
+            hs.background = "wearer";
+            hs.view_node = "R1";
+            hs.video = f;
+            hs.video_fps = 15;
+            hs.wearer = &v;
+            hs.video_state = VIDEO_OK;
+            hs.video_why = VIDEO_WHY_OK;
+            hs.now_ms = 1000000 + tm[i];
+            double t0 = now_us();
+            hud_render(cv, cfg, &hs);
+            double ms = (now_us() - t0) / 1000.0;
+            if (pass > 0 && ms < best[slot][i])
+                best[slot][i] = ms;
+            if (pass == 0) {
+                char name[32];
+                snprintf(name, sizeof name, "f%03d", i);
+                if (write_png(outdir, name, cv))
+                    return 1;
+            }
+        }
+    }
+    anim_set_enabled(1);
+    free(vid);
+    double sum[2] = { 0, 0 }, worst[2] = { 0, 0 }, extra = -1e9;
+    int worst_at[2] = { 0, 0 }, extra_at = 0;
+    for (int i = 0; i < nf; i++) {
+        for (int k = 0; k < 2; k++) {
+            sum[k] += best[k][i];
+            if (best[k][i] > worst[k]) {
+                worst[k] = best[k][i];
+                worst_at[k] = tm[i];
+            }
+        }
+        if (best[0][i] - best[1][i] > extra) {
+            extra = best[0][i] - best[1][i];
+            extra_at = tm[i];
+        }
+    }
+    printf("demo %d frames %dx%d (fastest of 3 runs per frame): animations on %.3f ms per frame, worst %.3f "
+           "at %d ms; off %.3f, worst %.3f at %d ms; most the animations add to one frame %+.3f ms at %d ms\n",
+           nf, cv->w, cv->h, sum[0] / nf, worst[0], worst_at[0], sum[1] / nf, worst[1], worst_at[1], extra,
+           extra_at);
+    return 0;
+}
+#endif
+
 int main(int argc, char **argv)
 {
-    const char *bg = NULL, *bg_close = NULL, *bg_down = NULL, *out = ".";
-    int W = 1280, H = 720, classic_all = 0, reps = 20;
+    const char *bg = NULL, *bg_close = NULL, *bg_down = NULL, *out = ".", *seq = NULL, *pseq = NULL;
+    const char *demo = NULL;
+    int W = 1280, H = 720, classic_all = 0, reps = 20, t0 = -100, t1 = 700, dt = 20, perf = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--bg") && i + 1 < argc) bg = argv[++i];
         else if (!strcmp(argv[i], "--bg-close") && i + 1 < argc) bg_close = argv[++i];
         else if (!strcmp(argv[i], "--bg-down") && i + 1 < argc) bg_down = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
+        else if (!strcmp(argv[i], "--alert-seq") && i + 1 < argc) seq = argv[++i];
+        else if (!strcmp(argv[i], "--person-seq") && i + 1 < argc) pseq = argv[++i];
+        else if (!strcmp(argv[i], "--demo") && i + 1 < argc) demo = argv[++i];
+        else if (!strcmp(argv[i], "--t0") && i + 1 < argc) t0 = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--t1") && i + 1 < argc) t1 = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dt") && i + 1 < argc) dt = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--perf")) perf = 1;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &W, &H);
         else if (!strcmp(argv[i], "--reps") && i + 1 < argc) reps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--classic-all")) classic_all = 1;
         else {
             fprintf(stderr, "usage: %s --bg frame.ppm [--bg-close frame.ppm] [--out dir] [--size WxH] "
-                            "[--classic-all] [--reps n]\n", argv[0]);
+                            "[--classic-all] [--reps n] [--alert-seq dir] [--demo dir] "
+                            "[--person-seq appear|xray|lost|all [--t0 ms] [--t1 ms] [--dt ms] [--perf]]\n",
+                    argv[0]);
             return 2;
         }
     }
@@ -226,6 +766,26 @@ int main(int argc, char **argv)
     f.rect[3] = H;
     snprintf(f.node_id, sizeof f.node_id, "R1");
 
+#ifndef HUD_SHOT_CLASSIC_ONLY
+    if (seq) {
+        int rc = run_seq(seq, &cv, &cfg, &health, &f, vid_far, vid_down);
+        free(cv.px);
+        return rc;
+    }
+    if (pseq) {
+        int rc = ps_run(pseq, t0, t1, dt, perf, out, &cv, &cfg, &f, vid_far, &health);
+        free(cv.px);
+        return rc;
+    }
+    if (demo) {
+        int rc = run_demo(demo, &cv, &cfg, &health, &f);
+        free(cv.px);
+        return rc;
+    }
+    anim_set_enabled(0); /* the stills show the settled look */
+#else
+    (void)seq, (void)pseq, (void)demo, (void)t0, (void)t1, (void)dt, (void)perf;
+#endif
     static const char *const states[] = { "normal", "close", "video-late", "map-fallback",
                                           "xray-no-skeleton", "down", "down-behind-wall" };
     const int n_states = (int)(sizeof states / sizeof states[0]);
