@@ -153,6 +153,13 @@ target_include_directories(test_handoff PRIVATE display)
 target_link_libraries(test_handoff seeker_fusion_core seeker_video seeker_draw)
 target_compile_definitions(test_handoff PRIVATE SEEKER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_test(NAME handoff COMMAND test_handoff WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+# Walk-behind-wall replay (tests/test_occlusion.c): a person cut by the wall's edge in R1's view,
+# before and after fusion's occlusion guard, plus direct checks of each part of it.
+add_executable(test_occlusion tests/test_occlusion.c display/projection.c display/wearer_view.c)
+target_include_directories(test_occlusion PRIVATE display)
+target_link_libraries(test_occlusion seeker_fusion_core seeker_video seeker_draw)
+target_compile_definitions(test_occlusion PRIVATE SEEKER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME occlusion COMMAND test_occlusion WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(test_supervisor tests/test_supervisor.c)
 target_link_libraries(test_supervisor seeker_sv)
 add_test(NAME supervisor_unit COMMAND test_supervisor)
