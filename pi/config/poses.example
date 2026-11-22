@@ -1,0 +1,7 @@
+# hud_fusion --poses config/poses.example
+# One phone per line: ID=x_m,y_m,yaw_deg (same numbers as phone.html ?pose=x_m,y_m,yaw_deg).
+# Room frame (IF-1): origin on the wearer's floor mark, +y forward, +x right,
+# yaw_deg = camera direction clockwise from +y (0 forward, 90 right, 180 back toward the wearer).
+# These pin the pose: message poses for these nodes are ignored. --pose on the command line wins.
+R1=-2.0,3.0,145   # front left corner, looking back toward the origin
+R2=2.0,3.0,215    # front right corner, looking back toward the origin
