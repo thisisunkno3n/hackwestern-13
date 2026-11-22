@@ -59,7 +59,7 @@
  *   SEEKER_POSTURE_LEG_VIS      0.5   knee/ankle visibility for a full leg
  *   SEEKER_POSTURE_CROUCH_KNEE  120   folded: knee under this (deg) ...
  *   SEEKER_POSTURE_CROUCH_THIGH 0.45  ... or thigh_drop under this
- *   SEEKER_POSTURE_CROUCH_LEG   0.41  ... or leg_h under this with the knee near the hip (0: off)
+ *   SEEKER_POSTURE_CROUCH_LEG   0.22  ... or leg_h under this with the knee near the hip (0: off)
  *   SEEKER_POSTURE_STAND_KNEE   150   supporting: knee over this (deg) ...
  *   SEEKER_POSTURE_STAND_THIGH  0.6   ... and thigh_drop over this
  *   SEEKER_POSTURE_ONE_LEG      0     1: one deeply folded leg is enough for CROUCH

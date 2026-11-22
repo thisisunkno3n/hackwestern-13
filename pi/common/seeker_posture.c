@@ -9,11 +9,11 @@
 
 enum { L_SH = 5, R_SH = 6, L_HIP = 11, R_HIP = 12, L_KN = 13, R_KN = 14, L_AN = 15, R_AN = 16 };
 
-static seeker_posture_tune g_tune = { 0.5f, 120.0f, 0.45f, 0.41f, 150.0f, 0.6f, 0, 6, 9 };
+static seeker_posture_tune g_tune = { 0.5f, 120.0f, 0.45f, 0.22f, 150.0f, 0.6f, 0, 6, 9 };
 
 void seeker_posture_tune_defaults(seeker_posture_tune *t)
 {
-    static const seeker_posture_tune d = { 0.5f, 120.0f, 0.45f, 0.41f, 150.0f, 0.6f, 0, 6, 9 };
+    static const seeker_posture_tune d = { 0.5f, 120.0f, 0.45f, 0.22f, 150.0f, 0.6f, 0, 6, 9 };
     *t = d;
 }
 
