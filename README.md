@@ -13,7 +13,8 @@ draws it over the wearer's own camera:
 - a floor plan inset with the wearer, the other camera, walls and everyone found.
 
 "Through walls" means through another camera's view, placed correctly in yours. A QNX supervisor
-keeps the pipeline running, restarting a crashed stage while the HUD keeps drawing.
+(`seeker_supervisor`, started by `pi/scripts/run_demo.sh`) can restart a crashed stage while the HUD
+keeps drawing; the live script `pi/scripts/run-live.sh` starts the stages directly.
 
 The code still uses the earlier project names (`seeker_*`, `EagleEye`); they are the same system.
 
