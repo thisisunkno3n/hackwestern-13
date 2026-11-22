@@ -9,7 +9,7 @@ Felix runs it on `qnxpi-felix.local` (QNX 8.0, Pi 5).
 
 ## Wire format
 
-Exactly IF-5.6 in [INTERFACES.md](../../INTERFACES.md#if-56-video_frame-new-relay---display-local-tcp):
+Exactly IF-5.6 in [INTERFACES.md](../INTERFACES.md#if-56-video_frame-new-relay---display-local-tcp):
 a stream of frames, each a 36-byte big-endian header followed by `payload_len` bytes of JPEG.
 No other bytes go between frames.
 

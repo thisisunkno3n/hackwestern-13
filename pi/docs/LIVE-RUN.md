@@ -57,8 +57,7 @@ Use the `.local` name: raw IP links (`172.20.10.x`) did not load on the iPhone h
 | `R2` on tag 7 only (`R2_MODE=tag7`, today's `phone.html`) | `https://qnxpi-felix.local:8080/?node=R2&tag=1&tagid=7&tagmm=186&tagw=640` |
 
 Accept the self-signed certificate once per phone. The helmet phone gets its pose from the
-ArUco tag at the room origin (`?tag=1`, Daniel's PR #5, see
-[../../progress/DANIEL-apriltag-pose-decision.md](../../progress/DANIEL-apriltag-pose-decision.md));
+ArUco tag at the room origin (`?tag=1`, Daniel's PR #5);
 the compass (`&heading=1`) is no longer used for `R1`. Link flags:
 
 | Flag | Value | Why |
@@ -68,10 +67,8 @@ the compass (`&heading=1`) is no longer used for `R1`. Link flags:
 | `tagw` | `TAG_W` (640) | Detection width. `phone.html` defaults to 320, which decodes a 186 mm tag only out to about 1.3 m; 640 (the full 640x480 frame) reaches about 2.6 m (`tools/tag_frame_check.mjs`) |
 | `hfov` | `HFOV` (unset) | Helmet phone FOV in deg; the tag distance and every bearing use it (page default 66) |
 
-Open issues on the phone side (Daniel's lane):
-[../../progress/FELIX-asks-daniel-tag-review.md](../../progress/FELIX-asks-daniel-tag-review.md),
-and for R2's tag 7 fallback
-[../../progress/FELIX-asks-daniel-r2-multitag.md](../../progress/FELIX-asks-daniel-r2-multitag.md).
+Open issues on the phone side (Daniel's lane): the tag review, and for R2's tag 7 fallback,
+`phone.html` sending `pose.tag_id`.
 
 ## Tag setup
 
@@ -217,8 +214,7 @@ means the wrong phone's video reached the HUD (only R1's is shown; check `WEARER
 
 Daniel's `daniel/phone-smoothing` branch (`b806419`) fixes this with landmark height and a
 **Calibrate 2 m** button that stores `f` per phone. Until then, triangulation (both phones see
-the person) gives the position and mostly ignores the mono range. See
-[../../progress/DANIEL-TODO-phone-smoothing.md](../../progress/DANIEL-TODO-phone-smoothing.md).
+the person) gives the position and mostly ignores the mono range.
 
 ## Poses and room walls (Morrissette setup)
 
@@ -277,8 +273,7 @@ R2=-2.463,0.06,90` (no `--pose R2`) and prints the R2 link:
 **Phone side, today:** Daniel's `phone.html` (`main` `6c4f70e`) takes one tag id
 (`parseInt("0,7")` is 0) and does not send `pose.tag_id`. With this link R2 therefore uses
 **tag 0 only**, which works end to end now (a pose without `tag_id` is the room frame). The
-tag 7 fallback starts working, with no Pi change, once `phone.html` has the three-line change in
-[../../progress/FELIX-asks-daniel-r2-multitag.md](../../progress/FELIX-asks-daniel-r2-multitag.md).
+tag 7 fallback starts working, with no Pi change, once `phone.html` has the three-line change that sends `pose.tag_id`.
 Until then, if R2 cannot see tag 0 from where it stands, use **`R2_MODE=tag7`**: link
 `?tagid=7` and `hud_fusion --tag-frame R2=$TAG7_POSE` (all of R2's untagged poses are tag 7's).
 That works with today's page.
@@ -534,10 +529,8 @@ colours and the full-screen radar are measured from R1, not from tag 0.
   tag N, then `sh scripts/calibrate.sh tag N` (first link `?tagid=0`, then, phone not moved,
   `?tagid=N`). It adds `N=x,y,yaw` to `TAG_MAP` in `calib.env`; run-live passes each as
   `--tag-pose` and lists them in the helmet link (`?tagid=0,1,2,3`). Until Daniel's phone.html
-  sends `pose.tag_id` ([../../progress/FELIX-asks-daniel-r2-multitag.md](../../progress/FELIX-asks-daniel-r2-multitag.md))
-  only tag 0 is used.
-- No tag in view: position held; yaw from the compass when the page sends `heading_deg`
-  ([../../progress/FELIX-asks-daniel-heading.md](../../progress/FELIX-asks-daniel-heading.md));
+  sends `pose.tag_id`, only tag 0 is used.
+- No tag in view: position held; yaw from the compass when the page sends `heading_deg`;
   HUD corner `POSE HELD ... (NO TAG, COMPASS)` or `(NO TAG)`, status `R1 ..HZ HOLD`.
 - After 10 s without a tag (`fusion.pose_home_ms`): eases to `WEARER_POSE` (home), HUD `POSE
   HOME`. A tag back eases in over a few hundred ms instead of jumping.
@@ -616,12 +609,11 @@ phone's frame, with a real shin (MediaPipe invents hidden legs and often folds t
   blinks out instead of reading CROUCH. Add `&minaspect=1.0` to that phone's link (typed by hand)
   if crouching people vanish.
 - Limits: 2D only. Someone lying along the camera's line of sight (head toward the phone) looks
-  short and upright and may read STAND or UNKNOWN; see
-  [../../progress/FELIX-asks-daniel-posture.md](../../progress/FELIX-asks-daniel-posture.md).
+  short and upright and may read STAND or UNKNOWN.
 
 ## Fixed wearer (`WEARER_MODE=fixed`)
 
-Per [DANIEL-DECISION-fixed-wearer-nov21](../../progress/DANIEL-DECISION-fixed-wearer-nov21.md),
+Per Daniel's fixed-wearer decision (Nov 21),
 the wearer can stand still and be pinned like R2: no tag, no `POSE HELD`, more video fps.
 
 ```sh
@@ -671,7 +663,7 @@ latency: 24.0 fps drawn, 0 skipped | total p50 46 p95 71 ms = phone n/a + net p5
   stamp) of the last 30 s is the offset. So `net` is the queueing on top of the best case (the
   phone's WebSocket buffer, Wi-Fi, the relay), and a rising `net` means a backlog.
 - `phone`: camera frame grabbed to `ws.send` (canvas draw plus JPEG encode), only once Daniel's
-  page sends the optional field ([FELIX-asks-daniel-latency.md](../../progress/FELIX-asks-daniel-latency.md)); `n/a` today.
+  page sends the optional field; `n/a` today.
 - `base`: what none of the above sees (camera exposure, JPEG encode until the phone sends the
   field, the base Wi-Fi hop, the monitor's own processing). Measure it once with the stopwatch
   photo below and pass it as `LAT_BASE_MS`; the readout then shows the real camera-to-glass time.
