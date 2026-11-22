@@ -472,6 +472,12 @@ the ghost starts at 60% and is full in 150 ms, the hull hatch sweeps in from the
 (220 ms), then leader and plate. A person no longer drawn leaves a fading echo of their last frame or
 ghost for 220 ms (50% to 0, no plate). Hidden-person dashes march slowly (12 px/s). Someone who
 comes back within 2 s keeps their plate up. Words and distances are never animated.
+A person who changes look (x-ray ghost to seen box or back) is the handoff's job: with the handoff
+on, its 250 ms crossfade alone sets the opacity of both looks, so the ghost's 60% start and the
+corner trace are not played on top of it (no double fade); the hatch sweep, the marching dashes and
+the halos still style the looks while they dissolve, and the alert ring goes with the new look
+only. With `--handoff off` there is no crossfade and the look change plays the person animation
+(trace or ghost fade) instead. `--anim off` leaves exactly the handoff crossfade.
 `tools/hud_shot --person-seq appear|xray|lost|all` renders the animations frame by frame (`--perf`
 times them); the stills are drawn settled.
 

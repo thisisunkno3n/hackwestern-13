@@ -220,6 +220,26 @@ int anim_person_echo(int i, wv_item *it, seeker_track *k, int box[4], ap_fx *fx)
     return 1;
 }
 
+ap_fx ap_crossfading(ap_fx f)
+{
+    if (!f.active || f.echo)
+        return f;
+    f.mark_a = 1.0f;
+    f.trace = 1.0f;
+    f.active = f.hatch < 1.0f || f.leader < 1.0f || f.plate < 1.0f || f.march != 0.0f;
+    return f;
+}
+
+ap_fx ap_old_look(int direct)
+{
+    ap_fx f = none();
+    if (g_on && !direct) {
+        f.march = g_march;
+        f.active = f.march != 0.0f;
+    }
+    return f;
+}
+
 /* ---- drawing ---- */
 
 int ap_alpha(const ap_fx *fx, int a)

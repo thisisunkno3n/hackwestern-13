@@ -91,6 +91,13 @@ void anim_person_end(void);
  * track, box and the echo's fx; 0 if slot i is not a drawable echo. */
 int anim_person_echo(int i, wv_item *it, seeker_track *k, int box[4], ap_fx *fx);
 
+/* Handoff crossfade (wearer_view.h, WV_XFADE_MS): while it runs, it alone sets the opacity of the
+ * old and new looks. ap_crossfading drops the mark fade-in and the corner trace from the new look's
+ * fx and keeps the hatch sweep and the marching dashes; ap_old_look is the outgoing look's fx (a
+ * settled mark, its dashes still marching if it is an x-ray look). */
+ap_fx ap_crossfading(ap_fx fx);
+ap_fx ap_old_look(int direct);
+
 /* Drawing hooks (each one is the plain plan call when fx is inactive or settled). */
 int ap_alpha(const ap_fx *fx, int a);
 /* Seen frame: rectangle outline 2u wide plus the mid-side ticks, traced and faded per fx. */

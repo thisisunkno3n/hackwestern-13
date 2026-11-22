@@ -4269,6 +4269,108 @@ static void test_anim_switch(void)
     free(b.px);
 }
 
+/* ---- the handoff crossfade and the person animations on one person ---- */
+
+/* One person 5 m out, x-ray (R2 sees them) or seen (the wearer's phone W sees them too). */
+static void ah_scene(seeker_tracks *t, int seen)
+{
+    memset(t, 0, sizeof *t);
+    add_node(t, "W", "ok", 0, 0, 0);
+    add_node(t, "R2", "ok", -2, 1, 90);
+    seeker_track *k = add_track(t, seen ? "W,R2" : "R2", seen ? "W" : "R2", 1, -0.6f, 5.0f);
+    k->id = 1;
+    k->has_pts = 1;
+    for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+        k->pts[j][0] = SKEL_T[j][0];
+        k->pts[j][1] = SKEL_T[j][1];
+        k->pts[j][2] = 0.9f;
+    }
+}
+
+/* x-ray from s - 1500 ms, seen from s - 100 ms (the flip), every 20 ms up to s. */
+static void ah_run(canvas *c, wv_view *v, int anim, int handoff, int64_t s)
+{
+    static seeker_config cfg;
+    static seeker_tracks t;
+    seeker_config_defaults(&cfg);
+    anim_set_enabled(anim);
+    anim_alert_reset();
+    anim_map_reset();
+    memset(v, 0, sizeof *v);
+    wv_config_defaults(&v->cfg);
+    v->cfg.handoff = handoff;
+    for (int64_t tm = s - 1500; tm <= s; tm += 20) {
+        ah_scene(&t, tm >= s - 100);
+        v->clock_ms = tm;
+        wv_render(c, &cfg, v, &t, 0, NULL);
+    }
+}
+
+static int ah_diff(const canvas *a, const canvas *b, int x0, int y0, int x1, int y1)
+{
+    int n = 0;
+    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < a->h; y++)
+        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < a->w; x++)
+            n += a->px[y * a->stride + x] != b->px[y * b->stride + x];
+    return n;
+}
+
+static void test_anim_handoff(void)
+{
+    /* The fx: a look change mid-intro keeps its hatch sweep and marching, loses its own fades. */
+    const int64_t T = 20000;
+    anim_person_set_enabled(1);
+    anim_person_begin(T, 1.0f);
+    anim_person_track(5, 1);
+    anim_person_end();
+    anim_person_begin(T + 2000, 1.0f);
+    anim_person_track(5, 1);
+    anim_person_end();
+    anim_person_begin(T + 2040, 1.0f);
+    ap_fx f = anim_person_track(5, 0), g = ap_crossfading(f);
+    anim_person_end();
+    CHECK(f.active && f.mark_a < 1.0f && f.hatch < 1.0f && f.march != 0.0f);
+    CHECK(g.active && g.mark_a == 1.0f && g.trace == 1.0f && g.hatch == f.hatch && g.march == f.march);
+    ap_fx o = ap_old_look(0), os = ap_old_look(1);
+    CHECK(o.march == f.march && o.mark_a == 1.0f && o.hatch == 1.0f && !os.active);
+    anim_person_set_enabled(0);
+    CHECK(!ap_old_look(0).active && !ap_crossfading(anim_person_track(5, 0)).active);
+
+    /* Rendered: 331500 ms is a whole number of march periods (test_anim_person), and 100 ms after
+     * the flip the crossfade is at 0.4 while the corner trace would still be open. */
+    enum { W = 640, H = 360 };
+    const int64_t S = 331500;
+    canvas a = { calloc((size_t)W * H, 4), W, H, W }, b = { calloc((size_t)W * H, 4), W, H, W };
+    CHECK(a.px && b.px);
+    if (!a.px || !b.px) {
+        free(a.px);
+        free(b.px);
+        return;
+    }
+    static wv_view v;
+    draw_set_theme(DRAW_THEME_PLAN);
+    ah_run(&b, &v, 0, 1, S);
+    wv_stats off = v.last;
+    ah_run(&a, &v, 1, 1, S);
+    wv_stats on = v.last;
+    CHECK(off.n_drawn == 1 && on.n_drawn == 1 && off.n_fading == 1 && on.n_fading == 1);
+    CHECK(on.drawn[0].direct && on.drawn[0].x == off.drawn[0].x && on.drawn[0].w == off.drawn[0].w);
+    int bx = on.drawn[0].x, by = on.drawn[0].y, bw = on.drawn[0].w, bh = on.drawn[0].h;
+    int d_xfade = ah_diff(&a, &b, bx - 6, by - 6, bx + bw + 6, by + bh + 6);
+    /* --handoff off: no crossfade, so the person animations' own look change plays. */
+    ah_run(&b, &v, 0, 0, S);
+    ah_run(&a, &v, 1, 0, S);
+    CHECK(v.last.n_fading == 0 && v.last.n_drawn == 1);
+    int d_plain = ah_diff(&a, &b, bx - 6, by - 6, bx + bw + 6, by + bh + 6);
+    printf("anim handoff: mid-crossfade box differs anim on vs off in %d px (handoff on), %d px (handoff off)\n",
+           d_xfade, d_plain);
+    CHECK(d_xfade == 0 && d_plain > 50);
+    anim_set_enabled(1);
+    draw_set_theme(DRAW_THEME_CLASSIC);
+    free(a.px);
+    free(b.px);
+}
+
 /* ---- plan map animations (display/anim_map.h) ---- */
 
 static wv_config g_am_wc;
@@ -5629,6 +5731,7 @@ int main(void)
     test_anim_person();
     test_anim_map();
     test_anim_switch();
+    test_anim_handoff();
     test_colour_hysteresis();
     test_posture();
     test_calibration_and_freeze();

@@ -1439,19 +1439,30 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
             }
             r->n_posture[k->posture >= 0 && k->posture <= SEEKER_POSTURE_DOWN ? k->posture : 0]++;
             /* Marks: people behind walls first, then seen people over them. A change of look
-             * dissolves: the old look fades out in the same box while the new one fades in. */
+             * dissolves: the old look fades out in the same box while the new one fades in. The
+             * crossfade alone sets both looks' opacity; the person animations only style them,
+             * and the alert ring and hull outline go with the new look only. */
             r->fx = anim_alert_track(k->id, p_alarm(r, it, k), p_down(k));
             r->pfx = anim_person_track(k->id, it->direct);
-            draw_set_dash_phase(r->pfx.march);
             if (it->fade < 1.0f) {
+                r->pfx = ap_crossfading(r->pfx);
+                anim_fx nfx = r->fx;
+                ap_fx npfx = r->pfx;
                 wv_item old = *it;
                 old.direct = !it->direct;
                 int ob[4] = { box[i][0], box[i][1], box[i][2], box[i][3] };
+                r->pfx = ap_old_look(old.direct);
+                r->fx.ring = -1.0f;
+                r->fx.down = 0;
                 r->fade_a = 1.0f - it->fade;
+                draw_set_dash_phase(r->pfx.march);
                 p_marks(r, &old, k, ob);
+                r->fx = nfx;
+                r->pfx = npfx;
                 r->fade_a = it->fade;
                 r->n_fading++;
             }
+            draw_set_dash_phase(r->pfx.march);
             p_marks(r, it, k, box[i]);
             r->fade_a = 1.0f;
             draw_set_dash_phase(0);
