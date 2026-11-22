@@ -138,6 +138,7 @@
         <div class="plate brand"><b>Firewatch</b><span>Sensor</span></div>
         <div class="plate chip" id="hdg" style="display:none">Heading --</div>
         <div class="plate chip" id="tag" style="display:none">Tag --</div>
+        <div class="plate chip bad" id="warn" role="status" style="display:none"></div>
       </div>
       <div class="acts">
         <button class="plate btn" id="calBtn">Calibrate 2 m</button>
@@ -145,7 +146,7 @@
       </div>
     </div>
     <div class="plate alert banner" id="conn" role="alert">
-      <b>Not connected to the Pi</b><span>Check you are on the felix hotspot.</span>
+      <b>Not connected to the Pi</b><span id="connMsg">Check you are on the felix hotspot.</span>
     </div>
     <div class="spacer"></div>
     <div class="plate tb" id="stats">
@@ -185,7 +186,28 @@
 import { PoseLandmarker, FilesetResolver }
   from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
-const qs = new URLSearchParams(location.search);
+// Safari autocomplete often brings a re-opened link back as just ?node=R2, without &pose= and the
+// rest. Within one tab, keys missing from the new link are filled in from the last load of the
+// same node (keys in the link always win), so a reload never turns a pinned phone into pose null.
+// ?fresh=1 skips this.
+const QS_KEY = "seeker_qs";
+function restoreQuery() {
+  const q = new URLSearchParams(location.search);
+  const node = q.get("node") || q.get("id") || "R1";
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(QS_KEY) || "null");
+    if (q.get("fresh") !== "1" && saved && saved.node === node) {
+      let added = false;
+      for (const [k, v] of new URLSearchParams(saved.q)) if (!q.has(k)) { q.set(k, v); added = true; }
+      if (added) history.replaceState(history.state, "",
+        location.pathname + "?" + q.toString().replace(/%2C/gi, ",") + location.hash);
+    }
+    const keep = new URLSearchParams(q); keep.delete("cal"); keep.delete("fresh");
+    sessionStorage.setItem(QS_KEY, JSON.stringify({ node, q: keep.toString() }));
+  } catch (e) {}
+  return q;
+}
+const qs = restoreQuery();
 const NODE_ID   = qs.get("node") || qs.get("id") || "R1";   // Seeker node id R1/R2
 const HFOV_DEG  = parseFloat(qs.get("hfov") || "66");       // horizontal FOV of the phone camera
 // taped pose x_m,y_m,yaw_deg; null (not 0,0,0) when not given, so the Pi can tell "unknown" apart
@@ -194,11 +216,17 @@ const POSE = (() => { const r = qs.get("pose"); if (!r) return null;
 // live compass heading (helmet/worn phone): ?heading=1 -> send live yaw in every message
 const HEADING = qs.get("heading") === "1";
 let heading = null, heading0 = null;
-// wearer-camera video (view node only): ?video=1 streams JPEG frames to the Pi (IF-5.6)
-let videoOn = qs.get("video") === "1";
+// wearer-camera video (view node only, IF-5.6). ?video=1 streams from the start, except on R2:
+// the wall phone is not the view node in the live setup, the bridge drops its frames, and they
+// only eat hotspot uplink. R2 streams only when the relay asks with video_ctrl; ?video=always
+// forces it (plain ws_ingest with --view-node R2 sends no video_ctrl). Each new socket starts from
+// this default, and the bridge re-sends video_ctrl on every connection of its view node.
+const VIDEO_Q = qs.get("video");
+const VIDEO_DEFAULT = VIDEO_Q === "always" || (VIDEO_Q === "1" && NODE_ID !== "R2");
+let videoOn = VIDEO_DEFAULT;
 let VFPS = parseFloat(qs.get("vfps") || "15");
 const VQUALITY = parseFloat(qs.get("vq") || "0.6");
-let vseq = 0, capCanvas = null, capCtx = null, vtimer = null;
+let vseq = 0, capCanvas = null, capCtx = null, vtimer = 0, vtimerMs = 0, vBusyT = 0, vSkipT = -1e9;
 // ---- fiducial-marker self-localization (?tag=1): the moving R1 phone detects an ArUco marker,
 // treats it as the room origin, and reports THIS camera's own room pose in every message
 // (through currentPose(), so no new wire contract). Default OFF -> R2 / non-tag phones unchanged.
@@ -232,31 +260,96 @@ function setText(id, v) {
 setText("who", NODE_ID); setText("iNode", NODE_ID);
 setText("iTag", TAG ? "On" : "Off"); setText("iHdg", HEADING ? "On" : "Off");
 setText("sP", TAG ? "Tag" : HEADING ? "Compass" : POSE ? "Fixed" : "Unknown");
-function showVideo() { const t = videoOn ? "On" : "Off"; setText("sV", t); setText("iVideo", t); }
+// "Busy": frames were skipped in the last second because the uplink had not sent the previous ones.
+function showVideo() { const t = !videoOn ? "Off" : performance.now() - vSkipT < 1000 ? "Busy" : "On";
+  setText("sV", t); setText("iVideo", t); }
 showVideo();
 
 // ---- WebSocket link ----
-let ws = null, wsReady = false;
+// One socket at a time: every handler checks it still owns `ws`, so a late event from a replaced
+// socket can never close the live one or start a second reconnect chain. Retries back off 0.5, 1,
+// 2, 4, then every 5 s, with jitter so R1 and R2 do not retry in lockstep.
+const BACKOFF_MS = [500, 1000, 2000, 4000, 5000];
+const CONNECT_TIMEOUT_MS = 6000;  // Safari can sit in CONNECTING for a minute after the hotspot drops
+const STALL_MS = 5000;            // open, data waiting, and nothing leaves the send buffer this long
+const RESUME_RECYCLE_MS = 3000;   // hidden this long (screen locked): iOS has often dropped the socket silently
+const VIDEO_BUF_MAX = 64 * 1024;  // skip a video frame while this much is still unsent (drop, never queue)
+const DET_BUF_MAX = 256 * 1024;   // skip a detection message only when the link is far behind
+let ws = null, wsReady = false, retry = 0, retryTimer = 0, openTimer = 0, openedAt = 0;
+let queued = 0, drained = 0, drainedT = 0;   // bytes handed to this socket, and when they last drained
 function connect() {
-  ws = new WebSocket(WS_URL);
-  ws.onopen = () => { wsReady = true; setLink(true);
-    ws.send(JSON.stringify({ role:"sensor", node_id:NODE_ID, pose:currentPose() })); };
-  ws.onclose = () => { wsReady = false; setLink(false); setTimeout(connect, 1500); };
-  ws.onerror = () => { try { ws.close(); } catch(e){} };
-  ws.onmessage = (ev) => {   // relay can turn wearer video on/off (IF-5.0 video_ctrl)
+  clearTimeout(retryTimer); retryTimer = 0;
+  if (ws) dropSocket(ws);
+  setLink("joining");
+  let s;
+  try { s = new WebSocket(WS_URL); } catch (e) { scheduleReconnect(); return; }
+  ws = s; s.binaryType = "arraybuffer";
+  queued = drained = openedAt = 0; drainedT = performance.now();
+  clearTimeout(openTimer);
+  openTimer = setTimeout(() => {
+    if (ws === s && s.readyState === WebSocket.CONNECTING) { dropSocket(s); scheduleReconnect(); }
+  }, CONNECT_TIMEOUT_MS);
+  s.onopen = () => {
+    if (ws !== s) return;
+    clearTimeout(openTimer); wsReady = true; openedAt = drainedT = performance.now();
+    videoOn = VIDEO_DEFAULT; startVideoTimer(); showVideo();
+    setLink("live");
+    // role first, with the last known pose if the live one is missing right now (tag not seen yet)
+    wsSend(s, JSON.stringify({ role:"sensor", node_id:NODE_ID, pose:helloPose() }));
+  };
+  s.onclose = () => {
+    if (ws !== s) return;
+    if (openedAt && performance.now() - openedAt > 10000) retry = 0;
+    ws = null; wsReady = false; clearTimeout(openTimer);
+    scheduleReconnect();
+  };
+  s.onerror = () => {};   // a close event always follows
+  s.onmessage = (ev) => {   // relay can turn wearer video on/off (IF-5.0 video_ctrl)
+    if (ws !== s || typeof ev.data !== "string") return;
     try { const m = JSON.parse(ev.data);
-      if (m.type === "video_ctrl") { videoOn = !!m.stream_video; if (m.fps) VFPS = m.fps; startVideoTimer(); showVideo(); }
+      if (m && m.type === "video_ctrl") {
+        videoOn = !!m.stream_video; if (m.fps > 0) VFPS = m.fps; startVideoTimer(); showVideo(); }
     } catch (e) {}
   };
 }
-// The "not connected" banner waits CONN_GRACE_MS of continuous downtime, so the 1.5 s reconnect
-// retries don't make it flicker. setLink only runs after start(), never on the start screen.
+function dropSocket(s) {
+  s.onopen = s.onclose = s.onerror = s.onmessage = null;
+  try { s.close(); } catch (e) {}
+  if (ws === s) { ws = null; wsReady = false; }
+}
+function scheduleReconnect() {
+  if (retryTimer) return;
+  const d = BACKOFF_MS[Math.min(retry, BACKOFF_MS.length - 1)] * (1 + Math.random() * 0.25);
+  retry++;
+  retryTimer = setTimeout(connect, d);
+  setLink("down");
+  setText("connMsg", "Retrying by itself (attempt " + retry + "). Check you are on the felix hotspot.");
+}
+function reconnectNow() { retry = 0; connect(); }
+function wsSend(s, data) {
+  try { s.send(data); queued += typeof data === "string" ? data.length : data.byteLength; return true; }
+  catch (e) { if (ws === s) { dropSocket(s); scheduleReconnect(); } return false; }
+}
+// Runs every second. The page cannot see the bridge's pings, so a link that died without a close
+// (Wi-Fi gone, iOS dropped it) only shows as a send buffer that stops draining.
+function linkWatchdog(now) {
+  const s = ws;
+  if (!s || s.readyState !== WebSocket.OPEN) return;
+  const d = queued - s.bufferedAmount;
+  if (s.bufferedAmount === 0 || d > drained) { drained = d; drainedT = now; return; }
+  if (now - drainedT > STALL_MS) { dropSocket(s); scheduleReconnect(); }
+}
+// The "not connected" banner waits CONN_GRACE_MS of continuous downtime, so quick reconnects
+// don't make it flicker. setLink only runs after start(), never on the start screen.
 const CONN_GRACE_MS = 2500;
 let connTimer = 0;
-function setLink(on){ el("ldot").classList.toggle("on",on); el("lstate").textContent = on?"Live":"Offline";
-  el("link").classList.toggle("up", on); el("link").classList.toggle("down", !on);
+function setLink(state) {   // "live", "joining" or "down"
+  const on = state === "live";
+  el("ldot").classList.toggle("on", on); setText("lstate", on ? "Live" : state === "joining" ? "Joining" : "Offline");
+  el("link").classList.toggle("up", on); el("link").classList.toggle("down", state === "down");
   if (on) { clearTimeout(connTimer); connTimer = 0; el("conn").classList.remove("show"); }
-  else if (!connTimer) connTimer = setTimeout(() => el("conn").classList.add("show"), CONN_GRACE_MS); }
+  else if (!connTimer) connTimer = setTimeout(() => el("conn").classList.add("show"), CONN_GRACE_MS);
+}
 
 // ---- live compass heading (only when ?heading=1) ----
 function onOrient(e) {
@@ -280,6 +373,20 @@ function currentPose() {   // use instead of POSE in every ws.send
   const base = POSE || { x_m: 0, y_m: 0 };
   return { x_m: base.x_m, y_m: base.y_m, yaw_deg: liveYaw() };   // yaw_deg null until zeroed
 }
+// Last pose this tab sent, kept across reconnects and reloads. Only the role (hello) message falls
+// back to it; detection messages keep sending the live pose, null when the tag is out of view.
+const POSE_KEY = "seeker_pose_" + NODE_ID;
+let lastPose = (() => { try { const p = JSON.parse(sessionStorage.getItem(POSE_KEY));
+  return p && isFinite(p.x_m) && isFinite(p.y_m) ? p : null; } catch (e) { return null; } })();
+let lastPoseSaved = 0;
+function rememberPose(p) {
+  if (!p || !isFinite(p.x_m) || !isFinite(p.y_m)) return;
+  lastPose = p;
+  const t = Date.now();
+  if (t - lastPoseSaved > 2000) { lastPoseSaved = t;
+    try { sessionStorage.setItem(POSE_KEY, JSON.stringify(p)); } catch (e) {} }
+}
+function helloPose() { const p = currentPose(); if (p) rememberPose(p); return p || lastPose; }
 async function startHeading() {   // call inside the Start click (iOS needs HTTPS + a user gesture), before getUserMedia
   if (!HEADING) return;
   if (typeof DeviceOrientationEvent !== "undefined" &&
@@ -306,18 +413,30 @@ function skv2(nodeId, tsMs, w, h, seq, jpeg) {   // 36-byte SKV2 header + JPEG (
   return out.buffer;
 }
 function sendVideo() {
-  if (!videoOn || !ws || ws.readyState !== 1 || !vid || vid.readyState < 2) return;
+  const s = ws;
+  if (!videoOn || !s || s.readyState !== WebSocket.OPEN || document.hidden || !vid || vid.readyState < 2) return;
+  const now = performance.now();
+  if (vBusyT && now - vBusyT < 2000) return;     // one encode at a time; 2 s covers a lost toBlob callback
+  if (s.bufferedAmount > VIDEO_BUF_MAX) { vSkipT = now; return; }   // uplink behind: drop, never queue
   const w = vid.videoWidth, h = vid.videoHeight; if (!w) return;
   if (!capCanvas) { capCanvas = document.createElement("canvas"); capCtx = capCanvas.getContext("2d"); }
   if (capCanvas.width !== w) { capCanvas.width = w; capCanvas.height = h; }
   capCtx.drawImage(vid, 0, 0, w, h);
+  vBusyT = now;
   capCanvas.toBlob(b => {                         // async encode; never blocks the detection loop
-    if (!b || !ws || ws.readyState !== 1) return;
-    b.arrayBuffer().then(buf => { if (ws && ws.readyState === 1)
-      ws.send(skv2(NODE_ID, Date.now(), w, h, vseq++, new Uint8Array(buf))); });
+    if (!b) { vBusyT = 0; return; }
+    b.arrayBuffer().then(buf => {
+      if (videoOn && ws === s && s.readyState === WebSocket.OPEN && s.bufferedAmount <= VIDEO_BUF_MAX)
+        wsSend(s, skv2(NODE_ID, Date.now(), w, h, vseq++, new Uint8Array(buf)));
+      else vSkipT = performance.now();
+    }).catch(() => {}).finally(() => { vBusyT = 0; });
   }, "image/jpeg", VQUALITY);
 }
-function startVideoTimer() { if (videoOn && !vtimer) vtimer = setInterval(sendVideo, Math.max(33, 1000 / VFPS)); }
+function startVideoTimer() {
+  const ms = Math.max(33, 1000 / VFPS);
+  if (vtimer && (!videoOn || ms !== vtimerMs)) { clearInterval(vtimer); vtimer = 0; }
+  if (videoOn && !vtimer) { vtimerMs = ms; vtimer = setInterval(sendVideo, ms); }
+}
 
 // ---- fiducial-marker self-localization ---------------------------------------------------------
 // Pure, unit-tested core (test_tagpose.mjs). POSIT gives the marker's pose in the CAMERA frame:
@@ -551,25 +670,43 @@ function showCal() { el("calBtn").classList.remove("bad");
 el("calBtn").onclick = () => { calib = { until: performance.now() + 1500, samples: [], src: null };
                                el("calBtn").classList.remove("bad"); el("calBtn").textContent = "Hold still"; };
 showCal();
-async function start() {
-  el("startWrap").style.display = "none";
-  const stream = await navigator.mediaDevices.getUserMedia({
+let started = false, starting = false, stream = null, vision = null;
+const RUN_KEY = "seeker_run_" + NODE_ID;
+async function openCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  const st = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" }, width:{ideal:640}, height:{ideal:480} }, audio:false });
-  vid.srcObject = stream; await vid.play();
+  stream = st; vid.srcObject = st; await vid.play();
   ov.width = vid.videoWidth || 640; ov.height = vid.videoHeight || 480;
-
-  const vision = await FilesetResolver.forVisionTasks(
+  const t = st.getVideoTracks()[0];
+  if (t) t.addEventListener("ended", () => { if (stream === st) restartCamera(); });
+}
+async function createPose(delegate) {
+  if (!vision) vision = await FilesetResolver.forVisionTasks(
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-  pose = await PoseLandmarker.createFromOptions(vision, {
+  return PoseLandmarker.createFromOptions(vision, {
     baseOptions: { modelAssetPath:
       "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-      delegate: "GPU" },
+      delegate },
     runningMode: "VIDEO", numPoses: MAX_PPL,
     minPoseDetectionConfidence: DET_CONF, minPosePresenceConfidence: DET_CONF,
     minTrackingConfidence: DET_CONF });
+}
+async function start() {
+  if (started || starting) return;
+  starting = true;
+  try {
+    el("startWrap").style.display = "none";
+    await openCamera();
+    pose = await createPose("GPU");
+    started = true;
+  } finally { starting = false; }
+  try { sessionStorage.setItem(RUN_KEY, "1"); } catch (e) {}
   connect();
   loop();
   startVideoTimer();   // begins wearer-video capture if ?video=1 (or when video_ctrl enables it)
+  setInterval(health, 1000);
+  showHealth();
   if (TAG) {           // load ArUco + POSIT lazily; own try/catch so a CDN failure can't touch MediaPipe
     try {
       const arM = (await import(ARUCO_URL)).default, posM = (await import(POSIT_URL)).default;
@@ -588,7 +725,9 @@ function loop() {
   const now = performance.now();
   if (now === lastT) return; lastT = now;
 
-  const res = pose.detectForVideo(vid, now);
+  let res;
+  try { res = pose.detectForVideo(vid, now); detFails = 0; }
+  catch (e) { if (++detFails >= 10) rebuildPose(); return; }   // e.g. WebGL context lost after a screen lock
   ctx.clearRect(0,0,ov.width,ov.height);
   frames++; if (now - fpsT > 500) { setText("sF", String(Math.round(frames*1000/(now-fpsT)))); frames=0; fpsT=now; }
 
@@ -649,12 +788,84 @@ function loop() {
                          setText("sR", contacts[0].range_m === null ? "-" : contacts[0].range_m.toFixed(1) + " m"); }
   else { setText("sB", "-"); setText("sC", "-"); setText("sR", "-"); }
   const interval = (HEADING || TAG) ? 66 : (contacts.length ? 66 : 200);  // >=10 Hz for live heading / moving tag pose
-  if (wsReady && now - lastSent > interval) {
+  if (wsReady && ws && now - lastSent > interval) {
     lastSent = now;
-    ws.send(JSON.stringify({ type:"phone_detections", v:2, node_id:NODE_ID, pose:currentPose(),
-                             width:W, height:H, hfov_deg:HFOV_DEG, contacts }));
+    const p = currentPose(); if (p) rememberPose(p);
+    // far behind: skip this one, the next carries fresher contacts anyway
+    if (ws.bufferedAmount <= DET_BUF_MAX)
+      wsSend(ws, JSON.stringify({ type:"phone_detections", v:2, node_id:NODE_ID, pose:p,
+                                  width:W, height:H, hfov_deg:HFOV_DEG, contacts }));
   }
 }
+
+// ---- staying up unattended (the wall phone): detector, camera, wake lock, screen lock ----
+let detFails = 0, detRebuild = false;
+async function rebuildPose() {
+  if (detRebuild) return;
+  detRebuild = true; showHealth();
+  const old = pose; pose = null;
+  try { if (old) old.close(); } catch (e) {}
+  while (!pose) {
+    for (const d of ["GPU", "CPU"]) { try { pose = await createPose(d); break; } catch (e) {} }
+    if (!pose) await new Promise(r => setTimeout(r, 5000));
+  }
+  detFails = 0; detRebuild = false; showHealth();
+}
+let camBusy = false, camTryT = -1e9;
+function cameraOk() { const t = stream && stream.getVideoTracks()[0]; return !!t && t.readyState === "live"; }
+async function restartCamera() {
+  const now = performance.now();
+  if (!started || camBusy || document.hidden || now - camTryT < 3000) return;
+  camBusy = true; camTryT = now; showHealth();
+  try { await openCamera(); } catch (e) {} finally { camBusy = false; showHealth(); }
+}
+// Screen Wake Lock (Safari 16.4+): without it the untouched wall phone auto-locks, iOS suspends the
+// page, the camera stops and the socket dies without a close reaching the Pi. The system drops the
+// lock whenever the page is hidden, so it is taken again on return, on any touch, and every second.
+let wakeLock = null, wakeBusy = false;
+function keepAwake() {
+  if (wakeLock || wakeBusy || document.hidden || !("wakeLock" in navigator)) return;
+  wakeBusy = true;
+  navigator.wakeLock.request("screen").then(l => {
+    wakeLock = l;
+    l.addEventListener("release", () => { if (wakeLock === l) wakeLock = null; showHealth(); });
+  }).catch(() => {}).finally(() => { wakeBusy = false; showHealth(); });
+}
+// One chip for what is wrong on this phone right now; hidden when all is well.
+function showHealth() {
+  if (!started) return;
+  const msg = detRebuild ? "Detector restarting" : !cameraOk() ? "Camera restarting"
+            : !wakeLock ? "Screen may sleep" : "";
+  setText("warn", msg);
+  const w = el("warn"), d = msg ? "inline-block" : "none";
+  if (w.style.display !== d) w.style.display = d;
+}
+function health() {
+  if (document.hidden) return;
+  linkWatchdog(performance.now());
+  if (!cameraOk()) restartCamera();
+  else if (vid.paused) vid.play().catch(() => {});
+  keepAwake();
+  showVideo(); showHealth();
+}
+// Back from a screen lock or the app switcher: wake lock, camera and socket are all suspect.
+// Date.now(), not performance.now(): the monotonic clock can stand still while the phone sleeps.
+let hiddenAt = 0;
+function resume(force) {
+  const away = hiddenAt ? Date.now() - hiddenAt : 0;
+  hiddenAt = 0;
+  if (!started) return;
+  keepAwake();
+  camTryT = -1e9;
+  if (!cameraOk()) restartCamera(); else if (vid.paused) vid.play().catch(() => {});
+  if (force || !wsReady || away >= RESUME_RECYCLE_MS) reconnectNow();
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) hiddenAt = Date.now(); else resume(false);
+});
+addEventListener("pageshow", e => { if (e.persisted) resume(true); });   // back from the bfcache
+addEventListener("online", () => { if (started && !wsReady) reconnectNow(); });
+document.addEventListener("pointerdown", () => keepAwake(), { passive: true });
 
 // Seen-person cyan with a dark halo (cool colours stay visible in fire; the halo keeps them
 // readable on bright frames). Batched: one path per colour instead of one fill per landmark,
@@ -690,9 +901,17 @@ function startErrorText(e) {
     return "The camera is busy. Close other apps using it, then try again.";
   return "The camera or the pose model failed to load (" + msg + "). Check the connection and try again.";
 }
+function showStartError(e) { el("startWrap").style.display = "flex";
+  el("startErrMsg").textContent = startErrorText(e); el("startErr").classList.add("show"); }
 // startHeading() stays the first call in the tap: iOS only grants the compass prompt inside the gesture.
-el("startBtn").onclick = () => startHeading().then(start).catch(e => { el("startWrap").style.display="flex";
-  el("startErrMsg").textContent = startErrorText(e); el("startErr").classList.add("show"); });
+el("startBtn").onclick = () => { const h = startHeading(); keepAwake(); h.then(start).catch(showStartError); };
+// A reload (iOS discarding the tab, or the link opened again) used to wait on the start screen until
+// someone walked to the wall phone and tapped. If this tab already ran this node, start again by
+// itself; the button stays as the fallback. Not with ?heading=1 (the compass prompt needs a tap).
+// ?autostart=0 turns this off.
+let ranBefore = false;
+try { ranBefore = sessionStorage.getItem(RUN_KEY) === "1"; } catch (e) {}
+if (ranBefore && !HEADING && qs.get("autostart") !== "0") start().catch(showStartError);
 </script>
 </body>
 </html>
