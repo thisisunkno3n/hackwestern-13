@@ -126,24 +126,27 @@ def main():
         assert got["box"] == [100, 50, 60, 180], "box changed"
         print("PASS 1: pts (%d ints) forwarded byte-identical with bearing/box intact" % len(SKELETON))
 
-        # --- 2) fat 16-contact message: guard keeps it <= 8192 B, bearings survive ---
+        # --- 2) oversized message: guard actually fires, dropping pts but keeping the core ---
+        # Absurd 7-digit coords force the raw datagram well over 8192 B so the guard MUST run;
+        # a normal skeleton (PASS 1) does not trip it. This proves the guard drops only pts and
+        # never lets the datagram exceed the C recv buffer (which would lose every field).
         contacts = [{"id": "R2-%d" % i, "bearing_deg": float(i), "conf": 0.9,
                      "box": [i, i, 40, 160], "range_m": 3.0, "range_src": "full",
-                     # worst case: all off-frame 4-digit coords -> maximal pts bytes
-                     "pts": [1234, -987, 100] * 17}
+                     "pts": [-1234567, 1234567, 100] * 17}
                     for i in range(16)]
         fat = {"type": "phone_detections", "v": 2, "node_id": "R2", "pose": None,
                "width": 640, "height": 480, "hfov_deg": 66, "contacts": contacts}
         raw_len = len(json.dumps({**fat, "type": "remote_contacts"}))
+        assert raw_len > MAX_DGRAM, "test bug: raw message %d B did not exceed the limit" % raw_len
         ws_send_text(c, json.dumps(fat))
-        out, dlen = recv_msg(rx)
+        out, dlen = recv_msg(rx)   # recv_msg already asserts dlen <= MAX_DGRAM
         assert len(out["contacts"]) == 16, "expected 16 contacts, got %d" % len(out["contacts"])
         for i, ct in enumerate(out["contacts"]):
             assert abs(ct["bearing_deg"] - float(i)) < 1e-6, "bearing %d lost" % i
-        dropped = "pts" not in out["contacts"][0]
-        print("PASS 2: 16-contact fat message raw ~%d B -> delivered %d B (<= %d); "
-              "bearings intact; pts %s"
-              % (raw_len, dlen, MAX_DGRAM, "dropped by guard" if dropped else "kept"))
+            assert "pts" not in ct, "guard should have stripped pts from contact %d" % i
+        print("PASS 2: oversized raw %d B (> %d) -> guard fired -> delivered %d B (<= %d); "
+              "pts stripped from all 16, every bearing intact"
+              % (raw_len, MAX_DGRAM, dlen, MAX_DGRAM))
     finally:
         try:
             c.close()
