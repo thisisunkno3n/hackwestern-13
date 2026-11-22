@@ -417,7 +417,6 @@ typedef struct {
     int n_drawn;
     int drawn[SEEKER_MAX_TRACKS][9]; /* id, direct, x, y, w, h, level, skeleton top and bottom row */
     int skel_y0, skel_y1; /* canvas rows of the last ghost skeleton's highest and lowest joint */
-    int64_t now;    /* the frame's timestamp, ms */
     wv_view *view;  /* per-track display state (colour, eased box) */
     int plan;       /* draw_theme() == DRAW_THEME_PLAN */
     float u;        /* plan: frame height / 720 */
@@ -426,6 +425,7 @@ typedef struct {
     anim_fx fx;     /* plan: this person's alert animation (anim_alert.h), zero = none */
     int cur_slot;   /* plan: wv_view.colours slot of the person being labelled, -1 none */
     ap_fx pfx;      /* plan: the person being drawn's animation (anim_person.h), 0 = none */
+    int64_t now;    /* the frame's one timestamp (ms) */
 } rc;
 
 static int clampi(int v, int lo, int hi)
@@ -569,14 +569,21 @@ static void learn_tilt(wv_view *v, const wv_camera *cam, const seeker_tracks *t,
     }
 }
 
-static void item_box(const rc *r, const wv_item *it, const seeker_track *k, int *x, int *y, int *w,
-                     int *h)
+/* The box of a person in the wearer's picture. A person the wearer's phone sees is drawn in that
+ * phone's own detection box: it is measured in this very picture, where the fused room position
+ * projected back into it carries every range and pose error (most of all just after someone
+ * steps out from behind a wall, when the track still sits where the other phone ranged it). A
+ * person held as seen through WV_SEEN_HOLD_MS (the wearer's phone missed them this frame) stays
+ * in the last such box. Anyone else is drawn where their room position projects. Returns 1 for a
+ * box the wearer's phone measured (this frame's, or the held one). */
+static int item_box(const rc *r, const wv_item *it, const seeker_track *k, int *x, int *y, int *w,
+                    int *h)
 {
     const wv_camera *cc = &r->cam;
-    /* A seen person is drawn in the wearer phone's own box. In a frame that phone missed them
-     * (the SEEN hold, WV_SEEN_HOLD_MS) the track carries another phone's box, so the last own box
-     * stays: the projected one is a standing person from the floor to the top of the head, far
-     * bigger than the own box of someone close (legs below the frame) or crouched. */
+    /* The last own box stays through the frames the wearer's phone missed them (the SEEN hold) or
+     * another phone led the track: the projected box is a standing person from the floor to the
+     * top of the head, far bigger than the own box of someone close (legs below the frame) and
+     * tall and narrow on someone crouched. */
     wv_colour_slot *s = it->direct && it->slot >= 0 && r->view ? &r->view->colours[it->slot] : NULL;
     const float *nb = NULL;
     if (it->direct && k->has_node_box && !strcmp(k->node_id, r->w->node) && cc->image_w > 0 &&
@@ -588,9 +595,10 @@ static void item_box(const rc *r, const wv_item *it, const seeker_track *k, int 
             s->own_ms = r->now;
             memcpy(s->own_box, nb, sizeof s->own_box);
         }
-    } else if (s && it->held && s->own_ms && r->now - s->own_ms <= WV_SEEN_HOLD_MS + 100) {
+    } else if (s && s->own_ms && r->now - s->own_ms <= WV_SEEN_BOX_HOLD_MS) {
         nb = s->own_box;
     }
+    int own = nb != NULL;
     if (nb) {
         float sx = (float)r->vp.w / (float)cc->image_w, sy = (float)r->vp.h / (float)cc->image_h;
         *x = r->vp.x + (int)lroundf(nb[0] * sx);
@@ -625,6 +633,7 @@ static void item_box(const rc *r, const wv_item *it, const seeker_track *k, int 
     *y = clampi(*y, r->vp.y - 4, r->vp.y + r->vp.h + 4);
     *w = x1 - *x;
     *h = y1 - *y;
+    return own;
 }
 
 static int overlaps(const int *a, int x, int y, int w, int h)
@@ -756,15 +765,21 @@ static int draw_skeleton(rc *r, const wv_item *it, const seeker_track *k, uint32
 }
 
 /* WV_BOX_EASE: the drawn box glides toward this frame's box; a big jump (another detection, a
- * track that moved far) snaps so it never slides across the screen. */
-static void ease_box(rc *r, const wv_item *it, int *x, int *y, int *w, int *h)
+ * track that moved far) snaps so it never slides across the screen. So does the first box the
+ * wearer's phone measured itself (own, item_box) after a projected one: easing there from where
+ * the x-ray ghost stood drew the seen frame beside the person for the first frames. */
+static void ease_box(rc *r, const wv_item *it, int own, int *x, int *y, int *w, int *h)
 {
-    if (it->slot < 0 || !r->view || r->view->box_ease_off)
+    if (it->slot < 0 || !r->view)
         return;
     wv_colour_slot *s = &r->view->colours[it->slot];
+    int first_own = own && !s->box_own && r->w->handoff;
+    s->box_own = own;
+    if (r->view->box_ease_off)
+        return;
     float jump = hypotf((float)*x + *w * 0.5f - (s->bx + s->bw * 0.5f),
                         (float)*y + *h * 0.5f - (s->by + s->bh * 0.5f));
-    if (!s->box_valid || jump > WV_BOX_SNAP * (float)(*h > 1 ? *h : 1)) {
+    if (!s->box_valid || first_own || jump > WV_BOX_SNAP * (float)(*h > 1 ? *h : 1)) {
         s->bx = (float)*x, s->by = (float)*y, s->bw = (float)*w, s->bh = (float)*h;
         s->box_valid = 1;
     } else {
@@ -780,8 +795,8 @@ static void ease_box(rc *r, const wv_item *it, int *x, int *y, int *w, int *h)
 static void draw_in_view(rc *r, const wv_item *it, const seeker_track *k)
 {
     int x, y, w, h;
-    item_box(r, it, k, &x, &y, &w, &h);
-    ease_box(r, it, &x, &y, &w, &h);
+    int own = item_box(r, it, k, &x, &y, &w, &h);
+    ease_box(r, it, own, &x, &y, &w, &h);
     char rs[16], via[40];
     range_str(rs, sizeof rs, it);
     int cx = x + w / 2, gap = 6 + 2 * r->ts;
@@ -1134,8 +1149,8 @@ static void p_tag(rc *r, int bx, int by, int bw, float lead_dy, float dx, float 
 static void p_box(rc *r, const wv_item *it, const seeker_track *k, int b[4], int raw[4])
 {
     int x, y, w, h;
-    item_box(r, it, k, &x, &y, &w, &h);
-    ease_box(r, it, &x, &y, &w, &h);
+    int own = item_box(r, it, k, &x, &y, &w, &h);
+    ease_box(r, it, own, &x, &y, &w, &h);
     raw[0] = x, raw[1] = y, raw[2] = w, raw[3] = h;
     int bottom = r->c->h - P(r, 8);
     if (y + h > bottom)

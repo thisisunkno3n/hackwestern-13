@@ -5,7 +5,7 @@
  *   hud_fusion [--config config/seeker.json] [--debug] [--run-for <s>] [--no-health]
  *              [--no-smooth] [--smooth-alpha a] [--smooth-beta b] [--smooth-gate m]
  *              [--no-range-smooth] [--no-pose-gate] [--no-pose-smooth] [--no-pose-flip] [--no-handoff]
- *              [--no-crouch-range] [--no-occl-guard]
+ *              [--no-crouch-range] [--no-occl-guard] [--no-part-keep]
  *              [--pose ID=x_m,y_m,yaw_deg]... [--init-pose ID=x_m,y_m,yaw_deg]... [--poses FILE] [--pose-source message|config]
  *              [--tag-pose TAG=x_m,y_m,yaw_deg]... [--tag-frame ID=tag_x_m,tag_y_m,tag_yaw_deg]...
  *
@@ -41,6 +41,9 @@
  * near where the same phone just saw part of someone held partial, skeleton joints off the frame or
  * guessed in a partial view not taken, confirmed joint jumps, no glide from where an unseen person
  * would have walked on). The guard needs the handoff.
+ * --no-part-keep ranges a person from another phone's lone partial sighting (a head and an arm:
+ * the box-height range, about twice too far) even when a whole-body view already ranged them
+ * (seeker_fusion.h part_keep); the old code, to compare.
  * --no-pose-smooth takes every live message pose as is (no One Euro, SEEKER_POSE_*_CUTOFF).
  * --no-pose-gate turns off the jump gate on live message poses (seeker_fusion.h): every full
  * message pose is then taken at once, one-frame tag flips included.
@@ -116,7 +119,7 @@ static void usage(const char *argv0)
             "usage: %s [--config f] [--debug] [--run-for s] [--no-health]\n"
             "          [--no-smooth] [--smooth-alpha 0..1] [--smooth-beta 0..1] [--smooth-gate m]\n"
             "          [--no-range-smooth] [--no-pose-gate] [--no-pose-smooth] [--no-pose-flip] [--no-handoff]\n"
-            "          [--no-crouch-range] [--no-occl-guard]\n"
+            "          [--no-crouch-range] [--no-occl-guard] [--no-part-keep]\n"
             "          [--no-skel-smooth] [--person-h m] [--range-scale ID=k] [--no-range-hfov]\n"
             "          [--cam-h ID=m] [--cam-pitch ID=deg] [--ground-range]\n"
             "          [--wearer-node ID] [--predict-ms N] [--hfov ID=deg|preset]...\n"
@@ -148,6 +151,7 @@ int main(int argc, char **argv)
     double run_for = 0;
     int no_smooth = 0, no_range_smooth = 0, no_pose_gate = 0, no_skel_smooth = 0, predict_ms = -1;
     int no_pose_smooth = 0, no_pose_flip = 0, no_handoff = 0, no_crouch_range = 0, no_occl_guard = 0;
+    int no_part_keep = 0;
     const char *wearer_node = NULL;
     const char *hfov_args[SEEKER_MAX_NODES];
     int n_hfov = 0;
@@ -228,6 +232,8 @@ int main(int argc, char **argv)
             no_crouch_range = 1;
         else if (!strcmp(argv[i], "--no-occl-guard"))
             no_occl_guard = 1;
+        else if (!strcmp(argv[i], "--no-part-keep"))
+            no_part_keep = 1;
         else if (!strcmp(argv[i], "--no-skel-smooth"))
             no_skel_smooth = 1;
         else if (!strcmp(argv[i], "--wearer-node") && i + 1 < argc)
@@ -300,6 +306,7 @@ int main(int argc, char **argv)
     fus.handoff = !no_handoff;
     fus.crouch_range = !no_crouch_range;
     fus.occl_guard = !no_occl_guard && !no_handoff;
+    fus.part_keep = !no_part_keep && fus.occl_guard;
     fus.skel_smooth = !no_skel_smooth;
     for (int i = 0; i < n_hfov; i++) {
         char id[SEEKER_NODE_LEN];
@@ -516,6 +523,9 @@ int main(int argc, char **argv)
                    cfg.predict_ms);
     else
         seeker_log("occlusion guard: off%s", no_handoff ? " (needs the handoff)" : " (--no-occl-guard)");
+    seeker_log("part keep: %s", fus.part_keep ? "a phone that sees only part of someone already ranged whole keeps "
+                                                "their distance (bearing only)"
+                                              : "off, a part's box-height range moves the person");
     if (fus.skel_smooth)
         seeker_log("skeletons (pts): One Euro per joint (min cutoff %.1f Hz, beta %.1f), joints "
                    "under visibility %.2f held %d ms, whole skeleton held %d ms, up to %d per "
