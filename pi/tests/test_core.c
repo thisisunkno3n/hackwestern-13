@@ -2,6 +2,7 @@
  * the fusion rules, the IF-5.6 video path (SKV2 framing, JPEG decode, letterbox scale, TCP
  * receiver) and the EagleEye wearer view (projection, x-ray classification, mirror). */
 
+#include "anim_alert.h"
 #include "hud_render.h"
 #include "latency.h"
 #include "plan.h"
@@ -3598,6 +3599,288 @@ static void test_plan_render(void)
     free(c.px);
 }
 
+/* ---- plan theme alert animations (display/anim_alert.h) ---- */
+
+static int canvas_eq(const canvas *a, const canvas *b)
+{
+    return memcmp(a->px, b->px, (size_t)a->w * (size_t)a->h * 4) == 0;
+}
+
+static int canvas_diff(const canvas *a, const canvas *b)
+{
+    int n = 0;
+    for (int i = 0; i < a->w * a->h; i++)
+        n += a->px[i] != b->px[i];
+    return n;
+}
+
+static void test_anim_alert(void)
+{
+    anim_alert_set_enabled(1);
+    anim_alert_reset();
+    /* No frame time: everything is the plain plan look. */
+    anim_fx f = anim_alert_track(5, 1, 1);
+    CHECK(!f.on && anim_alert_tint(&f, P_SEEN) == P_SEEN && anim_alert_alpha(&f, 255) == 255);
+
+    /* Entering: the alert is on and red on the entering frame; the hatch starts at 20% and is
+     * full by 200 ms. */
+    anim_alert_frame(1000);
+    f = anim_alert_track(5, 0, 0);
+    CHECK(f.on && !f.alert && f.leave == 0 && f.ring < 0 && f.pulse == 1);
+    anim_alert_frame(1033);
+    f = anim_alert_track(5, 1, 0);
+    CHECK(f.on && f.alert && NEAR(f.hatch, ANIM_HATCH_START, 1e-6) && f.ring < 0 && f.pulse == 1);
+    CHECK(anim_alert_tint(&f, P_ALERT) == P_ALERT); /* no blend in: full alert colour at once */
+    f = anim_alert_track(5, 1, 0);                  /* asking again this frame changes nothing */
+    CHECK(NEAR(f.hatch, ANIM_HATCH_START, 1e-6));
+    anim_alert_frame(1133);
+    f = anim_alert_track(5, 1, 0);
+    CHECK(f.hatch > ANIM_HATCH_START && f.hatch < 1);
+    anim_alert_frame(1233);
+    f = anim_alert_track(5, 1, 0);
+    CHECK(f.hatch == 1);
+    /* Leaving: fades from the alert colour back to normal over 200 ms. */
+    anim_alert_frame(1500);
+    f = anim_alert_track(5, 0, 0);
+    CHECK(!f.alert && NEAR(f.leave, 1, 1e-6) && anim_alert_tint(&f, P_SEEN) == P_ALERT);
+    anim_alert_frame(1600);
+    f = anim_alert_track(5, 0, 0);
+    uint32_t mid = anim_alert_tint(&f, P_SEEN);
+    CHECK(NEAR(f.leave, 0.5, 1e-3) && mid != P_SEEN && mid != P_ALERT);
+    anim_alert_frame(1700);
+    f = anim_alert_track(5, 0, 0);
+    CHECK(f.leave == 0 && anim_alert_tint(&f, P_SEEN) == P_SEEN);
+    /* Back into the alert while the hatch was still fading: it stays full (no restart). */
+    anim_alert_frame(1800);
+    anim_alert_track(5, 1, 0);
+    anim_alert_frame(1850);
+    anim_alert_track(5, 0, 0);
+    anim_alert_frame(1900);
+    f = anim_alert_track(5, 1, 0);
+    CHECK(f.alert && f.hatch == 1);
+
+    /* Person down: ring ping for 500 ms from the entering frame, then the breathing pulse,
+     * period 1.2 s, never below 70%. */
+    anim_alert_frame(2000);
+    f = anim_alert_track(6, 1, 1);
+    CHECK(f.alert && f.down && f.ring == 0 && f.pulse == 1);
+    anim_alert_frame(2250);
+    f = anim_alert_track(6, 1, 1);
+    CHECK(NEAR(f.ring, 0.5, 1e-3) && f.pulse == 1);
+    anim_alert_frame(2500);
+    f = anim_alert_track(6, 1, 1);
+    CHECK(f.ring < 0 && NEAR(f.pulse, 1, 1e-6));
+    anim_alert_frame(3100);
+    f = anim_alert_track(6, 1, 1);
+    CHECK(NEAR(f.pulse, ANIM_PULSE_MIN, 1e-4)); /* half a period in: the low point */
+    anim_alert_frame(3700);
+    f = anim_alert_track(6, 1, 1);
+    CHECK(NEAR(f.pulse, 1, 1e-4)); /* a full period: back to 100% */
+    float lo = 2, hi = -1;
+    int alo = 256;
+    for (int64_t t = 3701; t < 12000; t += 7) {
+        anim_alert_frame(t);
+        f = anim_alert_track(6, 1, 1);
+        lo = fminf(lo, f.pulse), hi = fmaxf(hi, f.pulse);
+        int a = anim_alert_alpha(&f, 255);
+        if (a < alo)
+            alo = a;
+    }
+    printf("anim down pulse: %.3f to %.3f, lowest frame alpha %d of 255\n", lo, hi, alo);
+    CHECK(lo >= ANIM_PULSE_MIN - 1e-5f && lo < ANIM_PULSE_MIN + 0.01f && hi <= 1.0f && hi > 0.99f);
+    CHECK(alo >= 178); /* 70% of 255 */
+    /* Down without the alert (stale) is not down. */
+    f = anim_alert_track(9, 0, 1);
+    CHECK(!f.down && f.ring < 0 && f.pulse == 1);
+
+    /* Removal and id reuse: unseen for ANIM_FORGET_MS, the id starts fresh. */
+    anim_alert_frame(20000);
+    anim_alert_track(7, 1, 0);
+    anim_alert_frame(20000 + ANIM_FORGET_MS + 1);
+    f = anim_alert_track(7, 1, 0);
+    CHECK(f.alert && NEAR(f.hatch, ANIM_HATCH_START, 1e-6));
+    /* No id: no state. A full table: the extras get the plain look, nothing breaks. */
+    f = anim_alert_track(0, 1, 1);
+    CHECK(!f.on && f.alert);
+    for (int id = 100; id < 100 + ANIM_ALERT_SLOTS + 4; id++)
+        f = anim_alert_track(id, 1, 0);
+    CHECK(!f.on);
+    /* Time going back (hud_shot jumping) starts over; off is the plain look. */
+    anim_alert_frame(500);
+    f = anim_alert_track(7, 1, 0);
+    CHECK(f.on && NEAR(f.hatch, ANIM_HATCH_START, 1e-6));
+    anim_alert_set_enabled(0);
+    f = anim_alert_track(7, 1, 1);
+    CHECK(!f.on && !anim_alert_enabled());
+    anim_alert_set_enabled(1);
+
+    /* Title block cells and warning plates on a canvas. */
+    draw_set_theme(DRAW_THEME_PLAN);
+    const int W = 640, H = 360;
+    canvas a = { calloc((size_t)W * H, 4), W, H, W }, b = { calloc((size_t)W * H, 4), W, H, W };
+    CHECK(a.px && b.px);
+    if (!a.px || !b.px) {
+        free(a.px);
+        free(b.px);
+        return;
+    }
+    anim_alert_reset();
+    anim_alert_frame(1000);
+    anim_alert_cell(&a, 0, 20, 20, 15, P_INK, "R1 live 1", 10, 10, 200, 40);
+    /* Digits only ("1.2 s late" to "1.3 s late", the clock): swapped at once, crisp. */
+    anim_alert_frame(1033);
+    draw_clear(&a, 0);
+    anim_alert_cell(&a, 0, 20, 20, 15, P_INK, "R1 live 2", 10, 10, 200, 40);
+    anim_alert_frame(1066);
+    draw_clear(&a, 0);
+    draw_clear(&b, 0);
+    anim_alert_cell(&a, 0, 20, 20, 15, P_INK, "R1 live 3", 10, 10, 200, 40);
+    draw_ui_text_top(&b, 20, 20, 15, DRAW_FONT_MONO, P_INK, 255, "R1 live 3");
+    CHECK(canvas_eq(&a, &b));
+    /* New words: crossfade, the new value already drawn (60% or more) on the changing frame,
+     * plain text once 150 ms have passed. */
+    anim_alert_frame(1100);
+    draw_clear(&a, 0);
+    anim_alert_cell(&a, 0, 20, 20, 15, P_ALERT, "Video 1.2 s late", 10, 10, 200, 40);
+    draw_clear(&b, 0);
+    draw_ui_text_top(&b, 20, 20, 15, DRAW_FONT_MONO, P_ALERT, 153, "Video 1.2 s late");
+    int ink_a = count_near_rgb(&a, P_ALERT, 120, 0, W, 0, H), ink_b = count_near_rgb(&b, P_ALERT, 120, 0, W, 0, H);
+    CHECK(!canvas_eq(&a, &b) && ink_a > 20 && ink_a >= ink_b * 8 / 10);
+    anim_alert_frame(1100 + ANIM_CELL_MS);
+    draw_clear(&a, 0);
+    draw_clear(&b, 0);
+    anim_alert_cell(&a, 0, 20, 20, 15, P_ALERT, "Video 1.3 s late", 10, 10, 200, 40);
+    draw_ui_text_top(&b, 20, 20, 15, DRAW_FONT_MONO, P_ALERT, 255, "Video 1.3 s late");
+    CHECK(canvas_eq(&a, &b));
+    /* The late hatch sweeps in and fades out. */
+    float sw, k;
+    anim_alert_frame(2000);
+    CHECK(anim_alert_late(1, &sw, &k) && NEAR(sw, ANIM_HATCH_START, 1e-6) && k == 1);
+    anim_alert_frame(2000 + ANIM_HATCH_MS);
+    CHECK(anim_alert_late(1, &sw, &k) && sw == 1 && k == 1);
+    anim_alert_frame(2300);
+    CHECK(anim_alert_late(0, &sw, &k) && k == 1);
+    anim_alert_frame(2400);
+    CHECK(anim_alert_late(0, &sw, &k) && NEAR(k, 0.5, 1e-3));
+    anim_alert_frame(2300 + ANIM_LEAVE_MS);
+    CHECK(!anim_alert_late(0, &sw, &k));
+
+    /* Warning plate: drawn (60%, 8 px up) on its first frame, the plain plate after 150 ms,
+     * sliding out for 150 ms once it is gone. */
+    plan_line wl[2] = { { "R1 position held", DRAW_FONT_SANS_SEMIBOLD, 19, P_INK, 255 },
+                        { "phone lost its marker", DRAW_FONT_MONO, 15, P_INK, P_INK2_A } };
+    draw_clear(&b, 0);
+    plan_plate(&b, 0.5f, 12, 20, wl, 2, P_ALERT, 0);
+    canvas z = { calloc((size_t)W * H, 4), W, H, W };
+    anim_alert_frame(3000);
+    draw_clear(&a, 0);
+    anim_alert_warn(&a, 0.5f, 12, 20, wl, 2, P_ALERT);
+    anim_alert_warn_flush(&a, 0.5f);
+    CHECK(z.px && canvas_diff(&a, &z) > 500 && !canvas_eq(&a, &b));
+    anim_alert_frame(3000 + ANIM_PLATE_MS);
+    draw_clear(&a, 0);
+    anim_alert_warn(&a, 0.5f, 12, 20, wl, 2, P_ALERT);
+    anim_alert_warn_flush(&a, 0.5f);
+    CHECK(canvas_eq(&a, &b));
+    anim_alert_frame(3200);
+    draw_clear(&a, 0);
+    anim_alert_warn_flush(&a, 0.5f); /* gone this frame: still drawn, starting to leave */
+    CHECK(canvas_diff(&a, &z) > 500);
+    anim_alert_frame(3200 + ANIM_PLATE_MS);
+    draw_clear(&a, 0);
+    anim_alert_warn_flush(&a, 0.5f);
+    CHECK(canvas_eq(&a, &z));
+    free(z.px);
+
+    /* Through hud_render: someone steps close. Red on the very frame the state turns true; long
+     * after, the frame equals the plain plan theme exactly; animations off == plan at any time. */
+    static seeker_config cfg;
+    seeker_config_defaults(&cfg);
+    static wv_view v;
+    memset(&v, 0, sizeof v);
+    wv_config_defaults(&v.cfg);
+    v.cfg.visor = 1;
+    v.cfg.radar_fallback = 0;
+    v.box_ease_off = 1;
+    static seeker_tracks t;
+    memset(&t, 0, sizeof t);
+    add_node(&t, "W", "ok", 0, 0, 0);
+    seeker_track *p = add_track(&t, "W", "W", 1, 0.2f, 6.0f);
+    hud_state hs;
+    memset(&hs, 0, sizeof hs);
+    hs.t = &t;
+    hs.tracks_age_ms = 10;
+    hs.background = "wearer";
+    hs.view_node = "W";
+    hs.wearer = &v;
+    hs.video_state = VIDEO_LOST;
+    anim_alert_reset();
+    hs.now_ms = v.clock_ms = 50000;
+    hud_render(&a, &cfg, &hs);
+    CHECK(count_near_rgb(&a, P_ALERT, 70, 0, W, 0, H) == 0);
+    p->room_y_m = 1.0f;
+    memset(v.colours, 0, sizeof v.colours); /* the colour hold is fusion's business, not ours */
+    hs.now_ms = v.clock_ms = 50033;
+    hud_render(&a, &cfg, &hs);
+    int red = count_near_rgb(&a, P_ALERT, 70, 0, W, 0, H);
+    printf("anim entering frame: %d alert px\n", red);
+    CHECK(v.last.n_direct == 1 && red > 50);
+    /* The same moment with animations off differs only by decoration (the hatch sweep). */
+    anim_alert_set_enabled(0);
+    hud_render(&b, &cfg, &hs);
+    anim_alert_set_enabled(1);
+    CHECK(!canvas_eq(&a, &b) && count_near_rgb(&b, P_ALERT, 70, 0, W, 0, H) > 50);
+    /* Steady (a second in): pixel-identical to the plain plan look (animations off, and no
+     * frame time). The title block's clock can tick between renders, so try twice. */
+    int same = 0;
+    for (int tries = 0; tries < 2 && !same; tries++) {
+        hs.now_ms = v.clock_ms = 51033;
+        hud_render(&a, &cfg, &hs);
+        anim_alert_set_enabled(0);
+        hud_render(&b, &cfg, &hs);
+        anim_alert_set_enabled(1);
+        same = canvas_eq(&a, &b);
+    }
+    CHECK(same);
+    /* Off == plan at any moment, including the transition frames. */
+    p->room_y_m = 6.0f;
+    same = 0;
+    for (int tries = 0; tries < 2 && !same; tries++) {
+        anim_alert_set_enabled(0);
+        hs.now_ms = v.clock_ms = 52000;
+        hud_render(&a, &cfg, &hs);
+        hs.now_ms = 0;
+        anim_alert_set_enabled(1);
+        hud_render(&b, &cfg, &hs);
+        same = canvas_eq(&a, &b);
+    }
+    CHECK(same);
+    /* Leaving: 100 ms after the alert ended the colour is still on its way back. */
+    anim_alert_reset();
+    p->room_y_m = 1.0f;
+    hs.now_ms = v.clock_ms = 60000;
+    hud_render(&a, &cfg, &hs);
+    memset(v.colours, 0, sizeof v.colours); /* drop the colour hysteresis: far at once */
+    p->room_y_m = 6.0f;
+    hs.now_ms = v.clock_ms = 60100;
+    hud_render(&a, &cfg, &hs);
+    hs.now_ms = v.clock_ms = 60200;
+    hud_render(&a, &cfg, &hs);
+    int fading = count_near_rgb(&a, P_SEEN, 40, 0, W, 0, H);
+    hs.now_ms = v.clock_ms = 60400;
+    hud_render(&a, &cfg, &hs);
+    int settled = count_near_rgb(&a, P_SEEN, 40, 0, W, 0, H);
+    printf("anim leaving: %d seen-colour px mid fade, %d settled\n", fading, settled);
+    CHECK(settled > 30 && fading < settled);
+
+    /* Cleanup: no animation state or frame time leaks into later tests. */
+    anim_alert_reset();
+    anim_alert_set_enabled(1);
+    draw_set_theme(DRAW_THEME_CLASSIC);
+    free(a.px);
+    free(b.px);
+}
+
 /* ---- threat colour hysteresis (common/seeker_colour.h) ---- */
 
 /* The colour before this fix: red under near_m or while an EMA of tick-to-tick range change is
@@ -4720,6 +5003,7 @@ int main(void)
     test_skel_render();
     test_plan_primitives();
     test_plan_render();
+    test_anim_alert();
     test_colour_hysteresis();
     test_posture();
     test_calibration_and_freeze();

@@ -43,6 +43,7 @@ typedef struct {
     int video_frozen; /* video_rx_frozen(.., VIDEO_FREEZE_MS): the wearer view keeps the last
                        * picture (dark) through a VIDEO LOST instead of switching to radar */
     const char *lat_text; /* latency readout drawn top right (SEEKER_LAT=1), NULL for none */
+    int64_t now_ms; /* this frame's time for the plan theme's animations (one per frame), 0 = none */
 } hud_state;
 
 /* Returns 1 if this frame has the video picture composited into it, else 0 (radar fallback,

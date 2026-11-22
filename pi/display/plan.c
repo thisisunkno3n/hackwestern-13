@@ -1,4 +1,5 @@
 #include "plan.h"
+#include "anim_alert.h"
 #include "video_rx.h"
 
 #include <math.h>
@@ -225,13 +226,14 @@ int plan_title_block(canvas *c, float u, const char *camera, int camera_late,
     st.fill = P_PLATE;
     st.fill_a = P_PLATE_A;
     draw_cut_rect(c, (float)x0, (float)y, (float)total, (float)h, 12 * u, &st);
-    if (camera_late) {
+    float hsw, hk;
+    if (anim_alert_late(camera_late, &hsw, &hk)) {
         draw_poly_style hs = { 0 };
         hs.hatch = P_ALERT;
         hs.hatch_a = 77; /* 30% */
         hs.hatch_gap = 9 * u;
         hs.hatch_w = 2 * u;
-        draw_cut_rect(c, (float)x0, (float)y, (float)ws[0], (float)h, 0, &hs);
+        anim_alert_hatch_rect(c, (float)x0, (float)y, (float)ws[0], (float)h, 0, &hs, hsw, hk);
     }
     draw_poly_style es = { 0 };
     es.edge = P_INK;
@@ -243,8 +245,8 @@ int plan_title_block(canvas *c, float u, const char *camera, int camera_late,
         if (i)
             draw_line_aa(c, (float)x, (float)y, (float)x, (float)(y + h), 1.0f * u, DRAW_CAP_BUTT, P_INK, 56);
         draw_ui_text_top(c, x + pad, y + S(u, 8), kpx, DRAW_FONT_SANS_MEDIUM, P_INK, P_INK2_A, keys[i]);
-        draw_ui_text_top(c, x + pad, y + S(u, 27), vpx, DRAW_FONT_MONO, i == 0 && camera_late ? P_ALERT : P_INK,
-                         255, vals[i]);
+        anim_alert_cell(c, i, x + pad, y + S(u, 27), vpx, i == 0 && camera_late ? P_ALERT : P_INK, vals[i], x, y,
+                        ws[i], h);
         x += ws[i];
     }
     return total;
@@ -408,7 +410,7 @@ int plan_banner(canvas *c, float u, int y, const char *title, const char *value,
                        { value, DRAW_FONT_MONO, 15, P_INK, P_INK2_A } };
     int n = value && value[0] ? 2 : 1, w, h;
     plan_plate_size(u, l, n, &w, &h);
-    plan_plate(c, u, (c->w - w) / 2, y, l, n, edge, 0);
+    anim_alert_warn(c, u, (c->w - w) / 2, y, l, n, edge);
     return h;
 }
 

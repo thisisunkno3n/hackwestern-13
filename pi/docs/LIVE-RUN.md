@@ -442,11 +442,23 @@ cd ~/seeker/drafts/pi-lane && THEME=classic sh scripts/run-live.sh   # or HUD_AR
 | Plan bottom right (full screen when the camera is paused) | Heading up, the wearer as a triangle at its real pose (full screen: fusion's `wearer_node`, as the classic radar), R1's view cone dashed, walls hatched, R2 as a green circle with its cone, seen people as cyan squares, people behind walls as green dashed squares, magenta when close or down. 0 1 2 m scale bar |
 | Magenta-edged plate at the top | What is wrong: "Camera paused, showing plan" or "Video lost, last picture shown" with the reason, "Fusion lost", "R2 lost", "R1 position held", "R1 on compass", "R1 easing home" |
 
+State changes are animated (`display/anim_alert.c`), decoration only: a state that turns true is
+drawn in full on that frame, and nobody's drawn position or size is eased beyond fusion and the
+box smoothing. Entering an alert, the frame, plate edge and words turn magenta at once and the
+plate hatch sweeps in from the bottom-left corner (from 20%, full by 200 ms). Person down (in view,
+or behind a wall on the ghost's hull) adds one ring ping out from the frame (500 ms), then a calm
+breathing pulse of the frame (1.2 s, alpha 70% to 100%). Leaving an alert, the colours blend back
+over 200 ms. A title block cell whose words change crossfades over 150 ms (the new value starts at
+60%); a change of digits only (the clock, "1.2 s late", fps) swaps at once. Warning plates slide 8
+px in from above while fading in (150 ms) and leave the same way. Everything runs on one timestamp
+per frame (`hud_state.now_ms`), so `hud_shot --seq DIR` renders any moment; `now_ms` 0 or
+`anim_alert_set_enabled(0)` gives the still plan look exactly.
+
 Stale people are drawn faded rather than grey. The theme only changes drawing: tracking, the
 colour hysteresis and the fallback rules are the same as classic.
 `tools/hud_shot` renders both themes of a made-up scene on a laptop (no phones, no Pi):
 `python3 tools/hud_shot_room.py room.png` then convert it to PPM and run
-`build/hud_shot --bg room.ppm --out shots/`.
+`build/hud_shot --bg room.ppm --out shots/` (`--seq anim/` for the animation sequences).
 
 ### Box colours (wearer view)
 
