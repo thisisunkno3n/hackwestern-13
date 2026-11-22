@@ -67,6 +67,9 @@ void plan_plate_size(float u, const plan_line *l, int n, int *w, int *h);
 /* Plate with its top-left at (x, y): fill, optional red hatch (close), cut-corner edge, text. */
 void plan_plate(canvas *c, float u, int x, int y, const plan_line *l, int n, uint32_t edge,
                 int red_hatch);
+/* The same at `alpha` (0..255) times every layer's own alpha (anim_person's plate fade). */
+void plan_plate_a(canvas *c, float u, int x, int y, const plan_line *l, int n, uint32_t edge,
+                  int red_hatch, int alpha);
 /* Leader from (x0, y0) with a 6 px square at the start, a 45 degree elbow, then level to
  * (x1, y1). */
 void plan_leader(canvas *c, float u, float x0, float y0, float x1, float y1, uint32_t col);

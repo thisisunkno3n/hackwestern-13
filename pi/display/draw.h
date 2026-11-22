@@ -61,6 +61,12 @@ void draw_line_aa(canvas *c, float x0, float y0, float x1, float y1, float width
  * (with round or square caps the visible gap is gap - width). */
 void draw_dashed_aa(canvas *c, float x0, float y0, float x1, float y1, float width, float dash,
                     float gap, int cap, uint32_t col, int alpha);
+/* Dash phase in px for draw_dashed_aa, draw_dashed_rect and dashed draw_circle_aa: the pattern
+ * moves this far forward along each line (marching dashes). 0, the default, is the plain pattern. */
+void draw_set_dash_phase(float px);
+/* Where the first dash starts along a line under that phase (<= 0; 0 without one): for code that
+ * lays its own dashes in step with draw_dashed_aa's (dash halos), clipping each one at 0. */
+float draw_dash_start(float dash, float gap);
 /* Rectangle outline of dashed lines (butt caps), one per side. */
 void draw_dashed_rect(canvas *c, float x, float y, float w, float h, float width, float dash,
                       float gap, uint32_t col, int alpha);

@@ -80,7 +80,7 @@ target_link_libraries(seeker_supervisor seeker_sv seeker_fusion_core) # seeker_p
 
 # Plan theme: drafting primitives, Atkinson Hyperlegible compiled in (third_party/atkinson, made by
 # tools/gen_hud_fonts.py) and drawn with stb_truetype.
-add_library(seeker_draw STATIC display/draw.c display/draw_font.c display/plan.c display/anim_alert.c
+add_library(seeker_draw STATIC display/draw.c display/draw_font.c display/plan.c display/anim_alert.c display/anim_person.c
   third_party/atkinson/hud_fonts.c)
 target_include_directories(seeker_draw PUBLIC display fusion)
 target_link_libraries(seeker_draw PUBLIC seeker_common)

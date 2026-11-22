@@ -53,9 +53,11 @@ void plan_halo_dash(canvas *c, float u, float x0, float y0, float x1, float y1, 
     if (gap < 0)
         gap = 0;
     float ux = dx / len, uy = dy / len;
-    for (float a = 0; a < len && a < 20000.0f; a += dash + gap) { /* draw_dashed_aa's dashes */
-        float b = a + dash < len ? a + dash : len;
-        plan_halo_line(c, u, x0 + ux * a, y0 + uy * a, x0 + ux * b, y0 + uy * b, width, DRAW_CAP_BUTT, alpha);
+    /* Exactly draw_dashed_aa's dashes, phase included (draw_dash_start), so halos march with them. */
+    for (float a = draw_dash_start(dash, gap); a < len && a < 20000.0f; a += dash + gap) {
+        float b = a + dash < len ? a + dash : len, s = a > 0 ? a : 0;
+        if (b > s)
+            plan_halo_line(c, u, x0 + ux * s, y0 + uy * s, x0 + ux * b, y0 + uy * b, width, DRAW_CAP_BUTT, alpha);
     }
 }
 
@@ -122,26 +124,32 @@ void plan_plate_size(float u, const plan_line *l, int n, int *w, int *h)
 void plan_plate(canvas *c, float u, int x, int y, const plan_line *l, int n, uint32_t edge,
                 int red_hatch)
 {
+    plan_plate_a(c, u, x, y, l, n, edge, red_hatch, 255);
+}
+
+void plan_plate_a(canvas *c, float u, int x, int y, const plan_line *l, int n, uint32_t edge,
+                  int red_hatch, int alpha)
+{
     int w, h;
     plan_plate_size(u, l, n, &w, &h);
     draw_poly_style st = { 0 };
     st.fill = P_PLATE;
-    st.fill_a = P_PLATE_A;
+    st.fill_a = P_PLATE_A * alpha / 255;
     if (red_hatch) {
         st.hatch = P_ALERT;
-        st.hatch_a = 71; /* 28% */
+        st.hatch_a = 71 * alpha / 255; /* 28% */
         st.hatch_gap = 9 * u;
         st.hatch_w = 2 * u;
     }
     st.edge = edge;
-    st.edge_a = 255;
+    st.edge_a = alpha;
     st.edge_w = 1.5f * u;
-    plan_halo_rect(c, u, (float)x, (float)y, (float)w, (float)h, 10 * u, st.edge_w, 255);
+    plan_halo_rect(c, u, (float)x, (float)y, (float)w, (float)h, 10 * u, st.edge_w, alpha);
     draw_cut_rect(c, (float)x, (float)y, (float)w, (float)h, 10 * u, &st);
     int ty = y + S(u, 9);
     for (int i = 0; i < n; i++) {
         int px = S(u, (float)l[i].size);
-        draw_ui_text_top(c, x + S(u, 12), ty, px, l[i].font, l[i].col, l[i].alpha, l[i].text);
+        draw_ui_text_top(c, x + S(u, 12), ty, px, l[i].font, l[i].col, l[i].alpha * alpha / 255, l[i].text);
         ty += (int)lroundf((float)px * 1.15f) + S(u, 3);
     }
 }
