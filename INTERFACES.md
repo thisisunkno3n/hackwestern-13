@@ -56,9 +56,6 @@ All times are America/Toronto (ET). Names: processes `hud_*`, C symbols `seeker_
 
 ## IF-2 Repository Layout and Ownership
 
-Full file-by-file ownership, shared config key split, and handoff rules live in
-[BOUNDARIES.md](BOUNDARIES.md).
-
 Code repo: **`thisisunkno3n/hackwestern-13`** (public).
 Context repo: **`thisisunkno3n/hackwestern-13-context`** (private docs/contracts only).
 
@@ -419,7 +416,7 @@ Colours: **red** within `near_m` (2.0 m) or closing faster than `closing_mps` (0
 
 ## IF-8 Config (`config/seeker.json`)
 
-Key ownership is strictly split in [BOUNDARIES.md](BOUNDARIES.md#configseekerjson-key-split).
+Key ownership is strictly split: each section has one owner.
 
 | Section | Keys | Owner |
 | --- | --- | --- |

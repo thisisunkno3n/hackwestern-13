@@ -81,7 +81,7 @@ running on the loaner Pi for the Devpost.
 2. Network: the kit's default Wi-Fi is a hotspot with SSID `QNX` and password `everywhere` (public
    kit defaults), so a phone hotspot with that name works headless. Ethernet from a laptop is the
    fallback. Hosts: `qnxpi-felix.local` (helmet) and `qnxpi.local` (spare only); see
-   [tasks/ws0-bootstrap.md](workstreams/ws0-bootstrap.md#headless-pi-setup).
+   [qnx-setup.md](qnx-setup.md).
 3. Log in: `ssh qnxuser@<host>` with password `qnxuser` (kit default; QSTI docs:
    https://gitlab.com/qnx/quick-start-images/raspberry-pi-qnx-8.0-quick-start-image).
 4. Deploy: `scp build-qnx/hud_* config/seeker.json qnxuser@<host>:~/hackwestern-13/`. Seeker's

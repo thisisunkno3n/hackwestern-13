@@ -1,6 +1,6 @@
 # Seeker HUD architecture
 
-Contracts (names, fields, ports, priorities) are in [INTERFACES.md](INTERFACES.md); this file
+Contracts (names, fields, ports, priorities) are in [INTERFACES.md](../INTERFACES.md); this file
 explains how the pieces fit and why.
 
 ## Hardware
@@ -64,7 +64,7 @@ Two TFLite models on the CPU with XNNPACK, through the qnx-ports TensorFlow Lite
 by the QNX AI workshop on a QNX Pi 5): MediaPipe `palm_detection_lite` plus `hand_landmark_lite` for
 hands (workshop code), and a small person detector (EfficientDet-Lite0 or SSD MobileNet v2 COCO,
 person class only). ONNX Runtime from qnx-ports with a 320 px YOLO-nano is the alternative backend
-if TFLite person detection is too slow or too weak. Details: [sensor-driver-research.md](reference/sensor-driver-research.md).
+if TFLite person detection is too slow or too weak.
 
 ## Range
 
@@ -130,6 +130,6 @@ Everything except the `qnx:` capture source is POSIX (IF-1 Portability). Laptop 
 `webcam:0` or `video:` clips, `imshow` sink, sims for remote and head pose. **If no QNX Pi 5 is
 available (two are in hand, so this is only if both die),** the full stack runs on the **Radxa Cubie (A7Z) borrowed from Western
 Aero** on Linux with the same C270 as a UVC webcam. As far as we
-know QNX has no BSP for it, so that doesn't count for Best Use of QNX
-([prize-strategy.md](reference/prize-strategy.md#fallback-no-qnx-pi-5)). With a spare QNX Pi, the Cubie is only
+know QNX has no BSP for it, so that doesn't count for Best Use of QNX.
+With a spare QNX Pi, the Cubie is only
 needed if both die.

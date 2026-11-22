@@ -2,8 +2,7 @@
 
 Everything verified on the hackathon QNX 8.0 Raspberry Pi 5 image, Fri Nov 20 to Sat Nov 21 (ET).
 For the background on QNX itself (SDP, cross-compiling, the AI workshop as reference) see
-[qnx-primer.md](qnx-primer.md). The same setup appears as a WS0 section in
-[workstreams/ws0-bootstrap.md](workstreams/ws0-bootstrap.md#headless-pi-setup).
+[qnx-primer.md](qnx-primer.md).
 
 ## Machines
 
@@ -91,4 +90,4 @@ SSH tunnel.
 
 Separate processes per stage, a supervisor watchdog that restarts `hud_infer` live while the HUD
 keeps drawing, and a latency chart under `hud_stress` (HUD at priority 50 flat vs 10 spiky). Details:
-[architecture.md](architecture.md) and [INTERFACES.md](INTERFACES.md) IF-3, IF-6, IF-9.
+[architecture.md](architecture.md) and [INTERFACES.md](../INTERFACES.md) IF-3, IF-6, IF-9.

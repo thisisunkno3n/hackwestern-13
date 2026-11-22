@@ -25,7 +25,7 @@ on-screen terms (`FUSION LOST`, `FUS->HUD`, `R1`) identical to the narration.
 - **Stereo range (WS3):** at 0:30, "and with two cameras, range from stereo disparity."
 - **EagleEye wearer view:** `hud_display --view wearer` with a helmet phone `W`: solid box for
   people the helmet sees, dashed cyan `XRAY` box for people behind the wall, edge arrows for people
-  behind. 60-second beat and setup in [drafts/pi-lane/docs/EAGLEEYE.md](drafts/pi-lane/docs/EAGLEEYE.md#demo-script-60-s-inside-the-main-2-minute-demo).
+  behind. 60-second beat and setup in [pi/docs/EAGLEEYE.md](../pi/docs/EAGLEEYE.md#demo-script-60-s-inside-the-main-2-minute-demo).
 
 ## Rehearsal notes
 
@@ -34,7 +34,7 @@ on-screen terms (`FUSION LOST`, `FUS->HUD`, `R1`) identical to the narration.
 - Pre-record the latency chart as well as running it live; show the recorded one if the live run is slow.
 - If the visor isn't readable, demo in video mode on the laptop and hand the visor to a judge.
 - If running on the Radxa Cubie fallback: say "embedded Linux board", drop `pidin` (use `ps -eLo
-  pid,cls,rtprio,comm`), and never claim QNX ([prize-strategy.md](reference/prize-strategy.md#fallback-no-qnx-pi-5)).
+  pid,cls,rtprio,comm`), and never claim QNX.
 - Q&A crib: why QNX (process isolation, priorities, determinism under load); why on-device (no
   network in a fire, latency); what's next (thermal camera for smoke, a custom helmet PCB, mesh
   networking between helmets).
