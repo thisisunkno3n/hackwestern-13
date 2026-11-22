@@ -72,7 +72,7 @@ Config (`display.wearer`, Felix's `display.*` keys; all optional, see `config/se
 `ws_ingest.py` already copies a `pose` from any phone message into every `remote_contacts`, and
 `hud_fusion` uses the message pose unless the node is pinned. So a helmet phone that sends
 `pose: {x_m, y_m, yaw_deg}` with a compass-derived `yaw_deg` turns the HUD live. That needs a small
-phone.html change (Daniel's file): [progress/eagleeye-helmet-phone-note.md](../../../progress/eagleeye-helmet-phone-note.md).
+phone.html change (Daniel's file).
 Until then the heading is the static pose (`FIX`): the wearer faces room `+y`.
 
 For a live heading, **do not pin `W` in `hud_fusion`** (no `--pose W=...`); give its position in
@@ -80,7 +80,7 @@ For a live heading, **do not pin `W` in `hud_fusion`** (no `--pose W=...`); give
 
 ## Video
 
-With IF-5.6 video on TCP 47106 (`display/video_rx.c`, [VIDEO.md](VIDEO.md)), the wearer view draws
+With IF-5.6 video on TCP 47106 (`display/video_rx.c`, [VIDEO.md](../VIDEO.md)), the wearer view draws
 over the newest fresh frame: the projection uses the frame's decoded size (`src_w x src_h`) and
 its letterbox rectangle, so a 4:3 phone frame on the 16:9 monitor still lines up. Rules:
 

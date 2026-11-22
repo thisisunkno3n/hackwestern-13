@@ -1,8 +1,8 @@
 # Checkpoints 6 and 7 on the QNX Pi: supervisor, chaos test, full demo
 
 Numbering follows [MORNING.md](MORNING.md): **6** = slay `hud_fusion`, HUD shows `FUSION LOST`,
-the supervisor restarts it; **7** = full demo. In
-[lanes-and-checkpoints.md](../../lanes-and-checkpoints.md) the same two are numbered 7 and 8.
+the supervisor restarts it; **7** = full demo. In the team's lane plan (private context repo)
+the same two are numbered 7 and 8.
 
 Nothing here counts as passed until it runs on `qnxpi-felix.local` under QNX 8.0. The host runs
 listed at the end are only a pre-filter. Felix verifies on the Pi.
@@ -289,7 +289,7 @@ Then, in order:
 - [ ] Phone silence: lock R2; `NODE R2 LOST` within 1.5 s; unlock, it recovers within 3 s
 - [ ] `pidin` shows `hud_display` at `50f` during the whole run
 - [ ] Ctrl+C in session A stops the supervisor, both children and the relay (`stopped cleanly`)
-- [ ] 2-minute rehearsal per [demo-script.md](../../demo-script.md) (its kill beat now reads
+- [ ] 2-minute rehearsal per [demo-script.md](../docs/demo-script.md) (its kill beat now reads
       `slay hud_fusion` and `FUSION LOST`)
 
 ## Troubleshooting
