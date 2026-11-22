@@ -20,9 +20,18 @@
  *               vertical thigh; near 0 for a thigh that is horizontal or points at the camera,
  *               as when sitting, squatting or kneeling)
  *   thigh_ratio hip-knee length over the torso length (logged; short = thigh toward the camera)
- * A leg SUPPORTS the body when it is straight and vertical (knee over stand_knee and thigh_drop
- * over stand_thigh) and is FOLDED when its knee is under crouch_knee or thigh_drop is under
- * crouch_thigh.
+ *   leg_h       how far the ankle sits below the hip, over the body height in the same units:
+ *               the largest of thigh or shin / 0.245, torso / 0.29 and shoulder line / 0.25
+ *               (whatever the view shortens least). About 0.47 standing, 0.36 in an ordinary
+ *               crouch (hips 0.6 m up), 0.15 sitting on the heels. Only with both shoulders and
+ *               both hips visible (else 9: never low).
+ * A leg is LOW when leg_h is under crouch_leg and thigh_drop under SEEKER_POSTURE_LOW_THIGH. A
+ * leg SUPPORTS the body when it is straight and vertical (knee over stand_knee and thigh_drop
+ * over stand_thigh) and not low, and is FOLDED when its knee is under crouch_knee, thigh_drop is
+ * under crouch_thigh, or it is low. Low is the test that works facing the phone from chest
+ * height: the knees point at the camera, so the 2D knee angle stays near 160 deg, and the
+ * forward lean shortens the torso, so thigh_drop stays over crouch_thigh until the hips are
+ * almost on the floor.
  *
  * Rules, with dead bands that keep the current label (hysteresis):
  *   DOWN    torso over 65 deg from vertical (stays DOWN above 50), or legs visible and the body
@@ -33,13 +42,16 @@
  *   CROUCH  both legs full and both folded (squatting, kneeling, sitting). One folded leg with
  *           the other one hidden is the upper leg on a stair as often as a crouch: the label is
  *           kept as it is (one_leg 1: a single deeply folded leg, knee under 100 deg and
- *           thigh_drop under 0.3, is enough).
+ *           thigh_drop under 0.3, is enough). Side on, the far ankle is often behind the near
+ *           leg while the far hip and knee show: then one folded leg plus a far thigh that is
+ *           folded too (its knee under 0.7 of the full leg's longer segment below the hip; a
+ *           standing leg's is 1) is CROUCH.
  *   UNKNOWN no torso, or no full leg (ankles hidden or out of frame: behind a wall, a desk or a
  *           stair the legs are often hidden; no guess).
  *
  * Debounce: one vote per new skeleton (at most every SEEKER_POSTURE_VOTE_MIN_MS, and every
  * SEEKER_POSTURE_VOTE_REPEAT_MS while the skeleton is held or missing). A new label needs
- * vote_n of the last vote_m votes (7 of 10, about 0.5 s at the phone's 15 Hz), UNKNOWN needs
+ * vote_n of the last vote_m votes (6 of 9, about 0.4 s at the phone's 15 Hz), UNKNOWN needs
  * SEEKER_POSTURE_UNKNOWN_N of the last SEEKER_POSTURE_UNKNOWN_M (about 1 s), and a label stays
  * at least SEEKER_POSTURE_HOLD_MS.
  *
@@ -47,15 +59,17 @@
  *   SEEKER_POSTURE_LEG_VIS      0.5   knee/ankle visibility for a full leg
  *   SEEKER_POSTURE_CROUCH_KNEE  120   folded: knee under this (deg) ...
  *   SEEKER_POSTURE_CROUCH_THIGH 0.45  ... or thigh_drop under this
+ *   SEEKER_POSTURE_CROUCH_LEG   0.22  ... or leg_h under this with the knee near the hip (0: off)
  *   SEEKER_POSTURE_STAND_KNEE   150   supporting: knee over this (deg) ...
  *   SEEKER_POSTURE_STAND_THIGH  0.6   ... and thigh_drop over this
  *   SEEKER_POSTURE_ONE_LEG      0     1: one deeply folded leg is enough for CROUCH
- *   SEEKER_POSTURE_VOTES        7/10  votes for a new label, of the last frames
+ *   SEEKER_POSTURE_VOTES        6/9   votes for a new label, of the last frames
  */
 
 #include <stdint.h>
 
 #define SEEKER_POSTURE_VIS_MIN 0.3f      /* shoulders and hips */
+#define SEEKER_POSTURE_LOW_THIGH 0.75f /* thigh_drop under this with a short leg: folded */
 #define SEEKER_POSTURE_HOLD_MS 500
 #define SEEKER_POSTURE_RESET_MS 1000
 #define SEEKER_POSTURE_VOTES_MAX 16
@@ -68,7 +82,7 @@ enum { SEEKER_POSTURE_UNKNOWN, SEEKER_POSTURE_STAND, SEEKER_POSTURE_CROUCH, SEEK
 
 typedef struct {
     float leg_vis;
-    float crouch_knee, crouch_thigh;
+    float crouch_knee, crouch_thigh, crouch_leg;
     float stand_knee, stand_thigh;
     int one_leg;
     int vote_n, vote_m;
@@ -77,6 +91,9 @@ typedef struct {
 typedef struct {
     int ok; /* a full leg: hip, knee, ankle visible and in frame, real shin */
     float knee_deg, thigh_drop, thigh_ratio;
+    float seg, leg_h; /* the longer of thigh and shin; hip-to-ankle height over it */
+    int half;         /* not a full leg, but its hip and knee show and the other leg is full */
+    float thigh_h;    /* then: the knee's drop below the hip over the full leg's seg */
 } seeker_posture_leg;
 
 typedef struct {

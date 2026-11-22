@@ -502,10 +502,9 @@ int main(int argc, char **argv)
     else
         seeker_log("handoff: off (--no-handoff), old track identity");
     if (fus.crouch_range)
-        seeker_log("crouch range: a crouched contact's eye-to-ankle range is taken with the crouch "
-                   "height, x%.2f (%.2f over %.2f of standing; --no-crouch-range: as sent)",
-                   SEEKER_CROUCH_EYE_ANKLE_FRAC / SEEKER_STAND_EYE_ANKLE_FRAC,
-                   SEEKER_CROUCH_EYE_ANKLE_FRAC, SEEKER_STAND_EYE_ANKLE_FRAC);
+        seeker_log("body range: a range from a length shorter than the person (crouched, bent, legs "
+                   "hidden) is scaled by that length over the person's own torso, shoulders, thigh "
+                   "or shin (--no-crouch-range: as sent)");
     else
         seeker_log("crouch range: off (--no-crouch-range), ranges as the phones sent them");
     if (fus.occl_guard)

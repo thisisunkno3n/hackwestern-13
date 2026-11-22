@@ -597,31 +597,166 @@ static void step_pose(seeker_fusion *f, seeker_fusion_node *n, int64_t now)
     }
 }
 
-/* SEEKER_CROUCH_EYE_ANKLE_FRAC: the factor for contact c's range (1 unless phone.html ranged it
- * from eye to ankle and its landmarks are crouched); why gets the posture features. */
-static float crouch_range_k(const seeker_contact *c, int w, int h, char *why, int whysz)
+/* SEEKER_BODY_*: the factor for a contact's range, 1 for a whole standing person. phone.html
+ * ranges from one length in the picture: eye to ankle, else the torso, else the box of what it
+ * sees. Crouching or bending makes eye to ankle shorter than the person and the range reads long
+ * (2.1 m read 4.3 m while crouched, Pi run of 2026-11-22), which throws the track along that
+ * phone's ray; a box of a part of someone reads longer still. No posture label is used:
+ *   - Feet: while a contact's ankles stay on the same row of the picture (SEEKER_BODY_FEET_TOL)
+ *     the person has not moved toward or away from the phone, so a height that drops under
+ *     SEEKER_BODY_SAME of the tallest seen there is the person folding, and the range is scaled
+ *     by the two heights.
+ *   - Body: with no such reference (first seen crouched, feet moved), the height is taken from
+ *     the part the view shortens least (torso, shoulder line, thigh, shin, each over its share
+ *     of a standing height) and the range is scaled by the height used over that.
+ *   - A range from the box keeps the contact's last range from a body length for
+ *     SEEKER_BODY_TRUST_MS, else the shoulder line stands in.
+ * A range from the torso is left as sent. why gets the numbers. */
+typedef struct {
+    const char *src;
+    float used, body, ankle_y;
+    int feet;
+} body_meas;
+
+static int body_measure(const seeker_contact *c, int w, int h, body_meas *m)
 {
+    memset(m, 0, sizeof *m);
     if (!c->has_pts || !c->has_range || w <= 0 || h <= 0)
-        return 1.0f;
+        return 0;
     const float(*p)[3] = c->pts;
     const float v = 0.5f; /* phone.html VIS_MIN */
-    int top = p[0][2] > v || p[1][2] > v || p[2][2] > v;
-    int ankle = p[15][2] > v || p[16][2] > v;
-    if (!top || !ankle)
-        return 1.0f; /* ranged from the torso or the box */
-    float px[SEEKER_N_JOINTS][3];
+    float px[SEEKER_N_JOINTS][2];
+    int in[SEEKER_N_JOINTS]; /* seen and inside the frame: a joint to measure from */
     for (int j = 0; j < SEEKER_N_JOINTS; j++) {
         px[j][0] = p[j][0] * (float)w;
         px[j][1] = p[j][1] * (float)h;
-        px[j][2] = p[j][2];
+        in[j] = p[j][2] > v && p[j][0] > 0.005f && p[j][0] < 0.995f && p[j][1] > 0.005f &&
+                p[j][1] < 0.995f;
     }
-    seeker_posture_mask_offframe(px, p);
-    seeker_posture_feat ft;
-    if (!seeker_posture_features((const float(*)[3])px, &ft) ||
-        seeker_posture_classify(&ft, SEEKER_POSTURE_UNKNOWN) != SEEKER_POSTURE_CROUCH)
+#define SEG(a, b) hypotf(px[a][0] - px[b][0], px[a][1] - px[b][1])
+    /* the length phone.html ranged from (personHeightPx), as a standing height in px */
+    int eyes = (p[1][2] > v) + (p[2][2] > v), ankles = (p[15][2] > v) + (p[16][2] > v);
+    if (ankles && (eyes || p[0][2] > v)) {
+        float tx = px[0][0], ty = px[0][1], ax = 0, ay = 0;
+        if (eyes) {
+            tx = ty = 0;
+            for (int j = 1; j <= 2; j++)
+                if (p[j][2] > v)
+                    tx += px[j][0] / (float)eyes, ty += px[j][1] / (float)eyes;
+        }
+        for (int j = 15; j <= 16; j++)
+            if (p[j][2] > v)
+                ax += px[j][0] / (float)ankles, ay += px[j][1] / (float)ankles;
+        m->used = hypotf(tx - ax, ty - ay) / SEEKER_STAND_EYE_ANKLE_FRAC;
+        m->src = "eye to ankle";
+        m->feet = (in[15] || !(p[15][2] > v)) && (in[16] || !(p[16][2] > v));
+        m->ankle_y = ay / (float)h;
+    } else if (p[5][2] > v && p[6][2] > v && p[11][2] > v && p[12][2] > v) {
+        m->src = "torso";
+    } else if (c->has_box && c->box[3] > 0) {
+        m->used = c->box[3];
+        m->src = "box";
+    } else {
+        return 0;
+    }
+    if (in[5] && in[6]) {
+        m->body = SEG(5, 6) / SEEKER_BODY_SHOULDER_FRAC;
+        if (in[11] && in[12])
+            m->body = fmaxf(m->body, hypotf(0.5f * (px[5][0] + px[6][0] - px[11][0] - px[12][0]),
+                                            0.5f * (px[5][1] + px[6][1] - px[11][1] - px[12][1])) /
+                                         SEEKER_BODY_TORSO_FRAC);
+    }
+    static const int leg[2][3] = { { 11, 13, 15 }, { 12, 14, 16 } };
+    for (int s = 0; s < 2; s++) {
+        if (in[leg[s][0]] && in[leg[s][1]])
+            m->body = fmaxf(m->body, SEG(leg[s][0], leg[s][1]) / SEEKER_BODY_LEG_SEG_FRAC);
+        if (in[leg[s][1]] && in[leg[s][2]])
+            m->body = fmaxf(m->body, SEG(leg[s][1], leg[s][2]) / SEEKER_BODY_LEG_SEG_FRAC);
+    }
+#undef SEG
+    return 1;
+}
+
+/* Body: the height used over the person's own parts. A standing person reads 0.84 to 0.94 on
+ * the real phones (the parts over these shares come out a little taller than eye to ankle).
+ * Nothing changes down to SEEKER_BODY_K_KEEP; from SEEKER_BODY_K_FULL down the range is scaled
+ * in proportion; in between the two blend, so the range never steps. */
+static float body_ratio_k(const body_meas *m)
+{
+    if (m->used < 5.0f || m->body < 5.0f)
         return 1.0f;
-    seeker_posture_describe(&ft, why, whysz);
-    return SEEKER_CROUCH_EYE_ANKLE_FRAC / SEEKER_STAND_EYE_ANKLE_FRAC;
+    float r = m->used / m->body;
+    if (r >= SEEKER_BODY_K_KEEP)
+        return 1.0f;
+    float t = r <= SEEKER_BODY_K_FULL ? 1.0f
+                                      : (SEEKER_BODY_K_KEEP - r) / (SEEKER_BODY_K_KEEP - SEEKER_BODY_K_FULL);
+    float k = 1.0f + t * (r / SEEKER_BODY_STAND_K - 1.0f);
+    return k < SEEKER_BODY_K_MIN ? SEEKER_BODY_K_MIN : k;
+}
+
+static seeker_body_ref *body_ref(seeker_fusion_node *n, const char *id, int64_t now_ms)
+{
+    seeker_body_ref *old = &n->body[0];
+    for (int i = 0; i < SEEKER_BODY_REFS; i++) {
+        seeker_body_ref *b = &n->body[i];
+        if (b->ms && !strcmp(b->id, id))
+            return b;
+        if (b->ms < old->ms)
+            old = b;
+    }
+    memset(old, 0, sizeof *old);
+    snprintf(old->id, sizeof old->id, "%s", id);
+    old->ms = now_ms;
+    return old;
+}
+
+static float crouch_range_k(seeker_fusion_node *n, const seeker_contact *c, int64_t now_ms,
+                            char *why, int whysz)
+{
+    body_meas m;
+    if (!body_measure(c, n->image_w, n->image_h, &m))
+        return 1.0f;
+    seeker_body_ref *b = body_ref(n, c->id, now_ms);
+    float k = 1.0f;
+    if (m.src[0] == 'e') {
+        int same = b->has_feet && m.feet && now_ms - b->ms <= SEEKER_BODY_TRUST_MS &&
+                   fabsf(m.ankle_y - b->ankle_y) <= SEEKER_BODY_FEET_TOL;
+        if (same && m.used < SEEKER_BODY_SAME * b->used) {
+            k = m.used / b->used;
+            snprintf(why, (size_t)whysz, "feet on the same row, height %.0f of %.0f px", m.used, b->used);
+        } else if (same) {
+            b->used = fmaxf(b->used, m.used);
+        } else {
+            k = body_ratio_k(&m);
+            if (k < 1.0f)
+                snprintf(why, (size_t)whysz, "eye to ankle reads %.0f px of a %.0f px person", m.used, m.body);
+            b->has_feet = m.feet;
+            b->ankle_y = m.ankle_y;
+            b->used = m.used / k;
+        }
+        k = k < SEEKER_BODY_K_MIN ? SEEKER_BODY_K_MIN : k;
+        b->ms = now_ms;
+        b->trust_ms = now_ms;
+        b->trust_range = c->range_m * k;
+    } else if (m.src[0] == 't') {
+        b->ms = now_ms;
+        b->has_feet = 0;
+        b->trust_ms = now_ms;
+        b->trust_range = c->range_m;
+    } else {
+        b->ms = now_ms;
+        b->has_feet = 0;
+        if (b->trust_ms && now_ms - b->trust_ms <= SEEKER_BODY_TRUST_MS && b->trust_range < c->range_m) {
+            k = b->trust_range / c->range_m;
+            snprintf(why, (size_t)whysz, "box of a part, range kept from %lld ms ago",
+                     (long long)(now_ms - b->trust_ms));
+        } else {
+            k = body_ratio_k(&m);
+            if (k < 1.0f)
+                snprintf(why, (size_t)whysz, "box reads %.0f px of a %.0f px person", m.used, m.body);
+        }
+    }
+    return k;
 }
 
 static void apply_crouch_range(seeker_fusion_node *n, int64_t now_ms)
@@ -629,14 +764,13 @@ static void apply_crouch_range(seeker_fusion_node *n, int64_t now_ms)
     for (int i = 0; i < n->last.n; i++) {
         seeker_contact *c = &n->last.c[i];
         char why[160] = "";
-        float k = crouch_range_k(c, n->image_w, n->image_h, why, sizeof why);
-        if (k == 1.0f)
+        float k = crouch_range_k(n, c, now_ms, why, sizeof why);
+        if (k >= 0.999f)
             continue;
-        if (!n->crouch_ranges || now_ms - n->crouch_log_ms >= 5000) {
+        if (!n->crouch_ranges || now_ms - n->crouch_log_ms >= 2000) {
             n->crouch_log_ms = now_ms;
-            seeker_log("NODE %s crouch range %s: eye-to-ankle range %.2f m taken as crouched, "
-                       "%.2f m (x%.2f; %s; %ld so far)", n->id, c->id, c->range_m, c->range_m * k,
-                       k, why, n->crouch_ranges + 1);
+            seeker_log("NODE %s body range %s: %.2f m as sent, %.2f m (x%.2f; %s; %ld so far)", n->id,
+                       c->id, c->range_m, c->range_m * k, k, why, n->crouch_ranges + 1);
         }
         c->range_m *= k;
         n->crouch_ranges++;

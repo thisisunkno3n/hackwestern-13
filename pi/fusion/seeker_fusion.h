@@ -52,6 +52,37 @@
 
 typedef enum { NODE_WAIT = 0, NODE_OK, NODE_LOST } seeker_node_state;
 
+/* Crouch height model. phone.html ranges from the eye (or nose) to mid-ankle height over
+ * SEEKER_STAND_EYE_ANKLE_FRAC of the standing height when both show. Crouched (both legs folded,
+ * seeker_posture_classify on the contact's own landmarks) that height is
+ * SEEKER_CROUCH_EYE_ANKLE_FRAC of the standing height (about 0.48 in a full squat to 0.68 with a
+ * knee down), so the range reads 1.3 to 1.9x long: far enough past the other phone's fix that
+ * triangulation splits the person in two. Such a range is scaled by the ratio of the two. A
+ * contact ranged from the torso (no eyes or ankles at visibility 0.5) needs nothing: the torso
+ * does not fold. */
+#define SEEKER_STAND_EYE_ANKLE_FRAC 0.90f /* phone.html EYE_ANKLE_FRAC */
+#define SEEKER_CROUCH_EYE_ANKLE_FRAC 0.58f
+/* Body range (crouch_range_k): shares of a standing height, and the limits of the factor. */
+#define SEEKER_BODY_LEG_SEG_FRAC 0.25f  /* hip to knee, knee to ankle */
+#define SEEKER_BODY_TORSO_FRAC 0.30f    /* mid-shoulder to mid-hip (phone.html TORSO_FRAC) */
+#define SEEKER_BODY_SHOULDER_FRAC 0.24f /* shoulder to shoulder */
+#define SEEKER_BODY_STAND_K 0.88f       /* a standing person reads about this */
+#define SEEKER_BODY_K_KEEP 0.78f        /* at or over this: the range as sent */
+#define SEEKER_BODY_K_FULL 0.62f        /* at or under this: scaled in full */
+#define SEEKER_BODY_K_MIN 0.35f
+#define SEEKER_BODY_FEET_TOL 0.045f     /* ankles within this share of the picture height: same spot */
+#define SEEKER_BODY_SAME 0.85f          /* height under this share of the tallest there: folded */
+#define SEEKER_BODY_TRUST_MS 3000       /* how long a reference, or a range from a body length, stands */
+#define SEEKER_BODY_REFS 8
+typedef struct {
+    char id[SEEKER_ID_LEN]; /* the phone's contact id */
+    int64_t ms;             /* last message with it (0: free) */
+    int has_feet;           /* ankle_y and used are a reference */
+    float ankle_y, used;    /* ankle row (share of the height) and the tallest height in px there */
+    int64_t trust_ms;       /* last range from a body length, */
+    float trust_range;      /* and that range, corrected */
+} seeker_body_ref;
+
 typedef struct {
     char id[SEEKER_NODE_LEN];
     seeker_node_state state;
@@ -104,6 +135,7 @@ typedef struct {
     int warned_tag;        /* unknown tag id last logged, -1 none */
     int64_t crouch_log_ms; /* last "crouch range" log line */
     long crouch_ranges;    /* contacts ranged with the crouch height (logs, tests) */
+    seeker_body_ref body[SEEKER_BODY_REFS]; /* body range references, by contact id */
     /* Occlusion guard (SEEKER_OCCL_*): */
     unsigned char part[SEEKER_MAX_CONTACTS]; /* last message's contacts: 1 shows part of a body,
                                               * 2 whole but held partial, 4 near frag_bearing */
@@ -112,17 +144,6 @@ typedef struct {
     int frag_whole;        /* whole sightings near frag_bearing since then */
     long frag_held;        /* whole sightings taken as partial (logs, tests) */
 } seeker_fusion_node;
-
-/* Crouch height model. phone.html ranges from the eye (or nose) to mid-ankle height over
- * SEEKER_STAND_EYE_ANKLE_FRAC of the standing height when both show. Crouched (both legs folded,
- * seeker_posture_classify on the contact's own landmarks) that height is
- * SEEKER_CROUCH_EYE_ANKLE_FRAC of the standing height (about 0.48 in a full squat to 0.68 with a
- * knee down), so the range reads 1.3 to 1.9x long: far enough past the other phone's fix that
- * triangulation splits the person in two. Such a range is scaled by the ratio of the two. A
- * contact ranged from the torso (no eyes or ankles at visibility 0.5) needs nothing: the torso
- * does not fold. */
-#define SEEKER_STAND_EYE_ANKLE_FRAC 0.90f /* phone.html EYE_ANKLE_FRAC */
-#define SEEKER_CROUCH_EYE_ANKLE_FRAC 0.58f
 
 #define SEEKER_MAX_TAGS 16
 
