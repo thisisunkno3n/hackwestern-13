@@ -112,12 +112,29 @@ typedef struct {
  * (x-ray ghost to seen box or back) crossfades over WV_XFADE_MS in the plan theme, both drawn in
  * the same eased box. */
 #define WV_SEEN_HOLD_MS 400
-#define WV_SEEN_BOX_HOLD_MS 500 /* a seen person keeps the wearer phone's last own box this long */
 /* pitch_auto learns only from a box this tall against the projected standing person (the
  * landmark box, eyes to ankles, is about 0.9 of it). */
 #define WV_TILT_BOX_MIN 0.78f
 #define WV_TILT_BOX_MAX 1.15f
 #define WV_XFADE_MS 250
+/* A seen person's box is the wearer phone's own detection box. In a frame without one (the hold
+ * above, or another phone leading the track) the last one stays for WV_SEEN_BOX_HOLD_MS instead
+ * of a projected standing-person box (0.5 m wide, floor to 1.75 m: tall and narrow on a crouched
+ * person). Past that, the projected box of a seen person whose posture is CROUCH keeps its width
+ * and gets WV_CROUCH_BOX_H of its height, up from the floor. */
+#define WV_SEEN_BOX_HOLD_MS 500
+#define WV_CROUCH_BOX_H 0.6f
+
+/* Duplicate check by ray (wv_classify same_on_ray, with handoff on): another phone's
+ * single-phone track is the seen person d when that phone's ray crosses the wearer's line to d
+ * (the lines at least WV_DUP_CROSS_DEG apart) at a point where both ranges read
+ * WV_DUP_RANGE_LO to WV_DUP_RANGE_HI times the distance and one of them within
+ * WV_DUP_RANGE_OK (a size range reads up to 2x long on a crouched or cut-off person, rarely
+ * short). */
+#define WV_DUP_RANGE_LO 0.8f
+#define WV_DUP_RANGE_OK 1.3f
+#define WV_DUP_RANGE_HI 2.2f
+#define WV_DUP_CROSS_DEG 10.0f
 
 /* Drawn boxes move this fraction of the way to the new box each frame (30 fps: about 50 ms of
  * lag), so detection-box noise and 15 Hz steps do not shake the overlay; a jump larger than

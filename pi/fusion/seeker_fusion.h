@@ -118,14 +118,23 @@ typedef struct {
 
 /* Crouch height model. phone.html ranges from the eye (or nose) to mid-ankle height over
  * SEEKER_STAND_EYE_ANKLE_FRAC of the standing height when both show. Crouched (both legs folded,
- * seeker_posture_classify on the contact's own landmarks) that height is
- * SEEKER_CROUCH_EYE_ANKLE_FRAC of the standing height (about 0.48 in a full squat to 0.68 with a
- * knee down), so the range reads 1.3 to 1.9x long: far enough past the other phone's fix that
- * triangulation splits the person in two. Such a range is scaled by the ratio of the two. A
- * contact ranged from the torso (no eyes or ankles at visibility 0.5) needs nothing: the torso
- * does not fold. */
+ * seeker_posture_classify on the contact's own landmarks) that height is 0.85 of the standing one
+ * as the legs start to fold, 0.48 in a full squat, so the range reads 1.2 to 1.9x long: far
+ * enough past the other phone's fix that triangulation splits the person in two. Such a range is
+ * scaled by the height the phone measured over the standing one, and the standing one comes from
+ * the person's own body in the same picture: the longest of thigh or shin over
+ * SEEKER_BODY_LEG_SEG_FRAC, the torso over SEEKER_BODY_TORSO_FRAC and the shoulder line over
+ * SEEKER_BODY_SHOULDER_FRAC (limbs are true side on, the shoulders facing the phone). So the
+ * factor follows the crouch down and back up instead of stepping, never under
+ * SEEKER_CROUCH_EYE_ANKLE_MIN / 0.90 and never over 1; SEEKER_CROUCH_EYE_ANKLE_FRAC is used when
+ * no body length shows. A contact ranged from the torso (no eyes or ankles at visibility 0.5)
+ * needs nothing: the torso does not fold. */
 #define SEEKER_STAND_EYE_ANKLE_FRAC 0.90f /* phone.html EYE_ANKLE_FRAC */
 #define SEEKER_CROUCH_EYE_ANKLE_FRAC 0.58f
+#define SEEKER_CROUCH_EYE_ANKLE_MIN 0.42f
+#define SEEKER_BODY_LEG_SEG_FRAC 0.25f   /* hip to knee, knee to ankle: of the standing height */
+#define SEEKER_BODY_TORSO_FRAC 0.30f     /* mid-shoulder to mid-hip (phone.html TORSO_FRAC) */
+#define SEEKER_BODY_SHOULDER_FRAC 0.24f  /* shoulder to shoulder */
 
 #define SEEKER_MAX_TAGS 16
 

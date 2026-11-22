@@ -530,6 +530,10 @@ const VIS_MIN        = 0.5;   // landmark visibility needed for the full / torso
 // noise gate: reject detections that aren't shaped like an upright person (clutter, bags, draped cloth)
 const UPRIGHT_ON = qs.get("upright") !== "0";
 const MIN_ASPECT = parseFloat(qs.get("minaspect") || "1.5");   // box height/width must exceed this (standing person is tall)
+// ...unless the pose shows a body (shoulders, hips and a whole leg): a crouched or sitting person
+// is about as wide as tall, and dropping them here made them vanish from this phone instead of
+// reading CROUCH on the Pi. ?crouchaspect=1.5 is the old gate.
+const BODY_ASPECT = Math.min(MIN_ASPECT, parseFloat(qs.get("crouchaspect") || "0.7"));
 const EYE_ANKLE_FRAC = 0.90;  // eye (or nose) to mid-ankle, fraction of standing height
 const TORSO_FRAC     = 0.30;  // mid-shoulder to mid-hip, fraction of standing height
 const OE_ON          = qs.get("oe") !== "0";                    // ?oe=0: raw, for comparison
@@ -574,8 +578,13 @@ function packPts(lms) {
 
 // Pixel height of the whole person, and how it was measured: { hpx, src } or null.
 // Does this pose look like an upright human? Rejects squat clutter and scrambled skeletons.
+function bodyShown(lms) {
+  const ok = i => vis(lms[i]) > VIS_MIN;
+  return ok(11) && ok(12) && ok(23) && ok(24) && ((ok(25) && ok(27)) || (ok(26) && ok(28)));
+}
 function isUpright(lms, box) {
-  if (box && box[2] > 0 && box[3] / box[2] < MIN_ASPECT) return false;     // too squat for a standing person
+  const minAspect = bodyShown(lms) ? BODY_ASPECT : MIN_ASPECT;
+  if (box && box[2] > 0 && box[3] / box[2] < minAspect) return false;      // too squat for a person
   const noseY = vis(lms[0]) > 0.3 ? lms[0].y : null;                        // y grows downward
   const hipY  = (vis(lms[23]) > 0.3 && vis(lms[24]) > 0.3) ? (lms[23].y + lms[24].y) / 2 : null;
   const shY   = (vis(lms[11]) > 0.3 && vis(lms[12]) > 0.3) ? (lms[11].y + lms[12].y) / 2 : null;

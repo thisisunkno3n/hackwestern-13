@@ -87,3 +87,5 @@ $CC $FLAGS "-DSEEKER_SOURCE_DIR=\"$(pwd)\"" -o "$OUT/test_occlusion" tests/test_
   display/projection.c display/wearer_view.c $DRAW $VIDEO $COMMON $LIBS
 $CC $FLAGS "-DSEEKER_SOURCE_DIR=\"$(pwd)\"" -o "$OUT/test_size" tests/test_size.c $FUSION \
   display/projection.c display/wearer_view.c $DRAW $VIDEO $COMMON $LIBS
+$CC $FLAGS "-DSEEKER_SOURCE_DIR=\"$(pwd)\"" -o "$OUT/test_crouch" tests/test_crouch.c $FUSION \
+  display/projection.c display/wearer_view.c $DRAW $VIDEO $COMMON $LIBS

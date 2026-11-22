@@ -599,17 +599,18 @@ static void step_pose(seeker_fusion *f, seeker_fusion_node *n, int64_t now)
     }
 }
 
-/* SEEKER_CROUCH_EYE_ANKLE_FRAC: the factor for contact c's range (1 unless phone.html ranged it
- * from eye to ankle and its landmarks are crouched); why gets the posture features. */
+/* SEEKER_CROUCH_*: the factor for contact c's range (1 unless phone.html ranged it from eye to
+ * ankle and its landmarks are crouched): the eye-to-ankle height the phone measured over the one
+ * the person would have standing, from their own body in the same picture; why gets the posture
+ * features. */
 static float crouch_range_k(const seeker_contact *c, int w, int h, char *why, int whysz)
 {
     if (!c->has_pts || !c->has_range || w <= 0 || h <= 0)
         return 1.0f;
     const float(*p)[3] = c->pts;
     const float v = 0.5f; /* phone.html VIS_MIN */
-    int top = p[0][2] > v || p[1][2] > v || p[2][2] > v;
-    int ankle = p[15][2] > v || p[16][2] > v;
-    if (!top || !ankle)
+    int eyes = (p[1][2] > v) + (p[2][2] > v), ankles = (p[15][2] > v) + (p[16][2] > v);
+    if ((!eyes && !(p[0][2] > v)) || !ankles)
         return 1.0f; /* ranged from the torso or the box */
     float px[SEEKER_N_JOINTS][3];
     for (int j = 0; j < SEEKER_N_JOINTS; j++) {
@@ -617,13 +618,40 @@ static float crouch_range_k(const seeker_contact *c, int w, int h, char *why, in
         px[j][1] = p[j][1] * (float)h;
         px[j][2] = p[j][2];
     }
+    float tx = px[0][0], ty = px[0][1], ax = 0, ay = 0; /* phone.html personHeightPx */
+    if (eyes) {
+        tx = ty = 0;
+        for (int j = 1; j <= 2; j++)
+            if (p[j][2] > v)
+                tx += px[j][0] / (float)eyes, ty += px[j][1] / (float)eyes;
+    }
+    for (int j = 15; j <= 16; j++)
+        if (p[j][2] > v)
+            ax += px[j][0] / (float)ankles, ay += px[j][1] / (float)ankles;
+    float seen = hypotf(tx - ax, ty - ay);
     seeker_posture_mask_offframe(px, p);
     seeker_posture_feat ft;
     if (!seeker_posture_features((const float(*)[3])px, &ft) ||
         seeker_posture_classify(&ft, SEEKER_POSTURE_UNKNOWN) != SEEKER_POSTURE_CROUCH)
         return 1.0f;
+    /* The person's height in px from what the view shortens least: thigh or shin (side on), the
+     * torso, the shoulder line (facing the phone). */
+    float body = 0;
+    for (int s = 0; s < 2; s++)
+        if (ft.leg[s].ok)
+            body = fmaxf(body, ft.leg[s].seg / SEEKER_BODY_LEG_SEG_FRAC);
+    if (px[5][2] > v && px[6][2] > v) { /* px: joints off the frame are masked */
+        body = fmaxf(body, hypotf(px[5][0] - px[6][0], px[5][1] - px[6][1]) / SEEKER_BODY_SHOULDER_FRAC);
+        if (px[11][2] > v && px[12][2] > v)
+            body = fmaxf(body, hypotf(0.5f * (px[5][0] + px[6][0] - px[11][0] - px[12][0]),
+                                      0.5f * (px[5][1] + px[6][1] - px[11][1] - px[12][1])) /
+                                   SEEKER_BODY_TORSO_FRAC);
+    }
     seeker_posture_describe(&ft, why, whysz);
-    return SEEKER_CROUCH_EYE_ANKLE_FRAC / SEEKER_STAND_EYE_ANKLE_FRAC;
+    float k = body > 1.0f ? seen / (SEEKER_STAND_EYE_ANKLE_FRAC * body)
+                          : SEEKER_CROUCH_EYE_ANKLE_FRAC / SEEKER_STAND_EYE_ANKLE_FRAC;
+    float lo = SEEKER_CROUCH_EYE_ANKLE_MIN / SEEKER_STAND_EYE_ANKLE_FRAC;
+    return k < lo ? lo : k > 1.0f ? 1.0f : k;
 }
 
 static void apply_crouch_range(seeker_fusion_node *n, int64_t now_ms)
@@ -631,6 +659,8 @@ static void apply_crouch_range(seeker_fusion_node *n, int64_t now_ms)
     for (int i = 0; i < n->last.n; i++) {
         seeker_contact *c = &n->last.c[i];
         char why[160] = "";
+        if (n->part[i])
+            continue; /* cut by an edge, or where a part just was: the legs are the pose model's guess */
         float k = crouch_range_k(c, n->image_w, n->image_h, why, sizeof why);
         if (k == 1.0f)
             continue;
@@ -723,10 +753,10 @@ int seeker_fusion_ingest(seeker_fusion *f, const seeker_remote_contacts *m, int6
     }
     if (m->hfov_deg > 0)
         n->hfov_deg = m->hfov_deg;
+    mark_partial(f, n, now_ms);
     if (f->crouch_range)
         apply_crouch_range(n, now_ms);
     apply_hfov(f, n, m);
-    mark_partial(f, n, now_ms);
     return (int)(n - f->nodes);
 }
 
@@ -1559,14 +1589,18 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
                                           f->skel_smooth ? 1 | (guard ? SEEKER_SKEL_CONFIRM : 0) : 0,
                                           k->pts);
             int was = mm->posture.label;
+            /* Posture from this message's own joints: the smoothed ones (One Euro, 1 Hz when
+             * still) trail a crouch by 0.3 to 0.5 s, and the votes already take out the jitter.
+             * Without a skeleton this tick, the held one. */
             float pp[SEEKER_N_JOINTS][3];
-            if (k->has_pts) {
+            int pv = have || k->has_pts;
+            if (have) {
+                memcpy(pp, raw, sizeof pp);
+                seeker_posture_mask_offframe(pp, (const float (*)[3])sc->pts);
+            } else if (k->has_pts) {
                 memcpy(pp, k->pts, sizeof pp);
-                if (have)
-                    seeker_posture_mask_offframe(pp, (const float (*)[3])sc->pts);
             }
-            k->posture = seeker_posture_update(
-                &mm->posture, k->has_pts ? (const float (*)[3])pp : NULL, now_ms);
+            k->posture = seeker_posture_update(&mm->posture, pv ? (const float (*)[3])pp : NULL, now_ms);
             if (k->posture != was) {
                 char why[160];
                 seeker_posture_describe(&mm->posture.feat, why, sizeof why);
