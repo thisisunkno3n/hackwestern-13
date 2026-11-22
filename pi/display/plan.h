@@ -62,6 +62,8 @@ void plan_square(canvas *c, float u, float cx, float cy, float s, uint32_t col, 
 /* Halo under a draw_cut_rect outline of edge width `ew`. */
 void plan_halo_rect(canvas *c, float u, float x, float y, float w, float h, float cut, float ew,
                     int alpha);
+/* The same halo inside st's own draw_poly pass (set st->edge_w first): one scan instead of two. */
+void plan_halo_style(draw_poly_style *st, float u, int alpha);
 
 /* Plate size for these lines (padding 12 x 9, 3 px between lines, 10 px for the cut). */
 void plan_plate_size(float u, const plan_line *l, int n, int *w, int *h);

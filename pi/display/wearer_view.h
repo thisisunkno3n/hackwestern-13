@@ -141,7 +141,9 @@ typedef struct {
     int video_stale;  /* set by the caller per frame: 1 the video passed in is stale (dimmed to
                        * half), 2 it is a frozen picture through VIDEO LOST (a quarter) */
     wv_colour_slot colours[WV_COLOUR_SLOTS]; /* per seen person, keyed by track id */
-    int64_t clock_ms; /* tests: render time; 0 = seeker_now_ms() */
+    int64_t clock_ms; /* the frame's one timestamp (ms) for the handoff hold and crossfade and the
+                       * person animations: hud_render sets it from hud_state.now_ms in the plan
+                       * theme, tests and tools set it; 0 = seeker_now_ms() at render */
     int box_ease_off; /* 1: draw boxes where they are this frame (no WV_BOX_EASE) */
     const char *delay_text; /* plan theme: camera to HUD delay for the title block's Delay cell
                              * (hud_state.lat_text, SEEKER_LAT=1), NULL for no cell */

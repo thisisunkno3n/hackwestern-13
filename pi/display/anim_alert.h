@@ -10,7 +10,8 @@
  *                       diagonally from the bottom-left corner (starts at 20%, full by 200 ms)
  *   person down         plus one ring ping out from the frame (500 ms), then a calm breathing
  *                       pulse of the frame, period 1.2 s, alpha 70% to 100% (never below 70%).
- *                       Behind a wall: the same ring and pulse on the hull, as an alert outline
+ *                       Behind a wall: the same ring and pulse on the hull, as a solid alert
+ *                       outline
  *   leaving an alert    colours blend back from P_ALERT to normal and the hatch fades, 200 ms
  *   title block         a cell whose words change crossfades old (40% to 0) to new (60% to
  *                       100%) over 150 ms; a change of digits only (the clock, "1.2 s late",
@@ -69,9 +70,10 @@ anim_fx anim_alert_track(int id, int alert, int down);
 /* Hooks for the plan theme's drawing; each is the plain plan drawing when f is off. */
 uint32_t anim_alert_tint(const anim_fx *f, uint32_t col); /* blends col toward P_ALERT while leaving */
 int anim_alert_alpha(const anim_fx *f, int alpha);        /* the down pulse */
-void anim_alert_ring(canvas *c, float u, const anim_fx *f, float x, float y, float w, float h);
-/* Behind a wall and down: ring plus a pulsing alert outline on the hull. */
-void anim_alert_hull(canvas *c, float u, const anim_fx *f, float x, float y, float w, float h);
+/* k: alpha factor (the handoff crossfade's share for this look, 1 otherwise). */
+void anim_alert_ring(canvas *c, float u, const anim_fx *f, float x, float y, float w, float h, float k);
+/* Behind a wall and down: ring plus a pulsing solid alert outline on the hull. */
+void anim_alert_hull(canvas *c, float u, const anim_fx *f, float x, float y, float w, float h, float k);
 /* plan_plate with the hatch sweep (entering) or fade (leaving). */
 void anim_alert_plate(canvas *c, float u, int x, int y, const plan_line *l, int n, uint32_t edge,
                       int red_hatch, const anim_fx *f);

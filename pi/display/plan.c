@@ -107,6 +107,13 @@ void plan_halo_rect(canvas *c, float u, float x, float y, float w, float h, floa
     draw_cut_rect(c, x, y, w, h, cut, &hs);
 }
 
+void plan_halo_style(draw_poly_style *st, float u, int alpha)
+{
+    st->halo = P_HALO;
+    st->halo_a = alpha > 0 ? halo_a(alpha) : 0;
+    st->halo_w = st->edge_w + P_HALO_W * u;
+}
+
 /* ---- plate and leader ---- */
 
 void plan_plate_size(float u, const plan_line *l, int n, int *w, int *h)
@@ -145,7 +152,7 @@ void plan_plate_a(canvas *c, float u, int x, int y, const plan_line *l, int n, u
     st.edge = edge;
     st.edge_a = alpha;
     st.edge_w = 1.5f * u;
-    plan_halo_rect(c, u, (float)x, (float)y, (float)w, (float)h, 10 * u, st.edge_w, alpha);
+    plan_halo_style(&st, u, alpha);
     draw_cut_rect(c, (float)x, (float)y, (float)w, (float)h, 10 * u, &st);
     int ty = y + S(u, 9);
     for (int i = 0; i < n; i++) {

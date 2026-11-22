@@ -1157,7 +1157,7 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
     int st = p_stale(r, k);
     if (it->direct) {
         uint32_t col = anim_alert_tint(&r->fx, p_alarm(r, it, k) ? P_ALERT : P_SEEN);
-        int a = anim_alert_alpha(&r->fx, (int)((st ? 115 : 255) * r->fade_a));
+        int a = (int)(anim_alert_alpha(&r->fx, st ? 115 : 255) * r->fade_a);
         if (r->pfx.active && (r->pfx.echo || r->pfx.trace < 1.0f)) { /* corner trace, or an echo */
             ap_seen_frame(r->c, r->u, x, y, w, h, col, a, &r->pfx);
             return;
@@ -1167,16 +1167,16 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
         fs.edge_a = a;
         fs.edge_w = 2.0f * r->u;
         float my = y + h * 0.5f, t8 = 8 * r->u;
-        plan_halo_rect(r->c, r->u, (float)x, (float)y, (float)w, (float)h, 0, fs.edge_w, a);
         plan_halo_line(r->c, r->u, x - t8, my, x + t8, my, 2 * r->u, DRAW_CAP_BUTT, a);
         plan_halo_line(r->c, r->u, x + w - t8, my, x + w + t8, my, 2 * r->u, DRAW_CAP_BUTT, a);
+        plan_halo_style(&fs, r->u, a);
         draw_cut_rect(r->c, (float)x, (float)y, (float)w, (float)h, 0, &fs);
         draw_line_aa(r->c, x - t8, my, x + t8, my, 2 * r->u, DRAW_CAP_BUTT, col, a);
         draw_line_aa(r->c, x + w - t8, my, x + w + t8, my, 2 * r->u, DRAW_CAP_BUTT, col, a);
-        anim_alert_ring(r->c, r->u, &r->fx, (float)x, (float)y, (float)w, (float)h);
+        anim_alert_ring(r->c, r->u, &r->fx, (float)x, (float)y, (float)w, (float)h, r->fade_a);
         return;
     }
-    int a = ap_alpha(&r->pfx, (int)((st ? 120 : 255) * r->fade_a));
+    int a = (int)(ap_alpha(&r->pfx, st ? 120 : 255) * r->fade_a);
     if (it->has_ray_span)
         plan_dash(r->c, r->u, (float)to_sx(r, it->ray_u0), (float)to_sy(r, it->ray_v0), (float)to_sx(r, it->ray_u1),
                   (float)to_sy(r, it->ray_v1), 2 * r->u, 10 * r->u, 7 * r->u, P_HIDDEN, a * 7 / 10);
@@ -1216,13 +1216,14 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
     }
     draw_poly_style hs = { 0 };
     hs.hatch = P_HIDDEN;
-    hs.hatch_a = ap_alpha(&r->pfx, (int)(18 * r->fade_a)); /* 7% */
+    hs.hatch_a = (int)(ap_alpha(&r->pfx, 18) * r->fade_a); /* 7% */
     hs.hatch_gap = 12 * r->u;
     hs.hatch_w = 2 * r->u;
-    ap_hatch_rect(r->c, (float)x, (float)y, (float)w, (float)h, &hs, &r->pfx);
+    if (hs.hatch_a >= 10 && !r->pfx.echo) /* a 4% hatch or an echo's is not worth the fill */
+        ap_hatch_rect(r->c, (float)x, (float)y, (float)w, (float)h, &hs, &r->pfx);
     plan_dash_rect(r->c, r->u, (float)x, (float)y, (float)w, (float)h, 1.5f * r->u, 10 * r->u, 7 * r->u, P_HIDDEN,
                    a * 55 / 100);
-    anim_alert_hull(r->c, r->u, &r->fx, (float)x, (float)y, (float)w, (float)h);
+    anim_alert_hull(r->c, r->u, &r->fx, (float)x, (float)y, (float)w, (float)h, r->fade_a);
     int nb = 0;
     /* Two passes: every halo first, then the colour, so one bone's halo never cuts another bone. */
     for (int pass = 0; have && pass < 2; pass++) {
@@ -1428,7 +1429,12 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
         for (int i = 0; i < n && i < SEEKER_MAX_TRACKS; i++) {
             const wv_item *it = &items[i];
             const seeker_track *k = &t->tracks[it->idx];
-            if (it->dup_of >= 0 || !it->has_bearing || !it->in_fov || it->direct != pass)
+            if (it->dup_of >= 0 || !it->has_bearing || !it->in_fov) {
+                if (pass == 0)
+                    anim_person_keep(k->id); /* still tracked, just not drawn here: no echo */
+                continue;
+            }
+            if (it->direct != pass)
                 continue;
             int raw[4];
             p_box(r, it, k, box[i], raw);
@@ -1441,7 +1447,7 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
             /* Marks: people behind walls first, then seen people over them. A change of look
              * dissolves: the old look fades out in the same box while the new one fades in. The
              * crossfade alone sets both looks' opacity; the person animations only style them,
-             * and the alert ring and hull outline go with the new look only. */
+             * and the alert decoration goes with the new look only. */
             r->fx = anim_alert_track(k->id, p_alarm(r, it, k), p_down(k));
             r->pfx = anim_person_track(k->id, it->direct);
             if (it->fade < 1.0f) {
@@ -1451,11 +1457,10 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 wv_item old = *it;
                 old.direct = !it->direct;
                 int ob[4] = { box[i][0], box[i][1], box[i][2], box[i][3] };
-                r->pfx = ap_old_look(old.direct);
-                r->fx.ring = -1.0f;
-                r->fx.down = 0;
+                memset(&r->fx, 0, sizeof r->fx);
+                memset(&r->pfx, 0, sizeof r->pfx);
                 r->fade_a = 1.0f - it->fade;
-                draw_set_dash_phase(r->pfx.march);
+                draw_set_dash_phase(old.direct ? 0.0f : anim_person_march());
                 p_marks(r, &old, k, ob);
                 r->fx = nfx;
                 r->pfx = npfx;

@@ -268,10 +268,33 @@ void draw_line_aa(canvas *c, float x0, float y0, float x1, float y1, float width
     if (by0 < 0) by0 = 0;
     if (bx1 > c->w) bx1 = c->w;
     if (by1 > c->h) by1 = c->h;
+    /* Covered pixels have across < A and along within (-ext - 0.5, len + ext + 0.5) (a round
+     * cap's disc fits that too); each row walks only that span of x, 2 px wider for rounding. */
+    float A = hw + 0.5f, alo = -ext - 0.5f, ahi = len + ext + 0.5f;
+    int use_y = fabsf(uy) >= 1e-3f, use_x = fabsf(ux) >= 1e-3f;
+    float iuy = use_y ? 1.0f / uy : 0.0f, iux = use_x ? 1.0f / ux : 0.0f;
     for (int j = by0; j < by1; j++) {
         float py = (float)j + 0.5f - y0;
         uint32_t *row = c->px + (size_t)j * (size_t)c->stride;
-        for (int i = bx0; i < bx1; i++) {
+        float lo = -1e9f, hi = 1e9f;
+        if (use_y) { /* px * uy - py * ux within (-A, A) */
+            float a = (py * ux - A) * iuy, b = (py * ux + A) * iuy;
+            lo = fmaxf(lo, fminf(a, b));
+            hi = fminf(hi, fmaxf(a, b));
+        }
+        if (use_x) { /* px * ux + py * uy within (alo, ahi) */
+            float a = (alo - py * uy) * iux, b = (ahi - py * uy) * iux;
+            lo = fmaxf(lo, fminf(a, b));
+            hi = fminf(hi, fmaxf(a, b));
+        }
+        int i0 = bx0, i1 = bx1;
+        if (lo > -1e8f && (float)i0 < lo + x0 - 3.0f)
+            i0 = (int)floorf(lo + x0 - 0.5f) - 2;
+        if (hi < 1e8f && (float)i1 > hi + x0 + 3.0f)
+            i1 = (int)ceilf(hi + x0 - 0.5f) + 3;
+        if (i0 < bx0) i0 = bx0;
+        if (i1 > bx1) i1 = bx1;
+        for (int i = i0; i < i1; i++) {
             float px = (float)i + 0.5f - x0;
             float along = px * ux + py * uy, across = fabsf(px * uy - py * ux), cov;
             if (cap == DRAW_CAP_ROUND) {
@@ -352,7 +375,8 @@ void draw_poly(canvas *c, const float *xy, int n, const draw_poly_style *st)
         bx1 = fmaxf(bx1, xy[2 * i]);
         by1 = fmaxf(by1, xy[2 * i + 1]);
     }
-    float hw = st->edge_a > 0 ? st->edge_w * 0.5f : 0.0f;
+    float he = st->edge_a > 0 ? st->edge_w * 0.5f : 0.0f, hh = st->halo_a > 0 ? st->halo_w * 0.5f : 0.0f;
+    float hw = he > hh ? he : hh;
     int ix0 = (int)floorf(bx0 - hw - 1), ix1 = (int)ceilf(bx1 + hw + 1);
     int iy0 = (int)floorf(by0 - hw - 1), iy1 = (int)ceilf(by1 + hw + 1);
     if (ix0 < 0) ix0 = 0;
@@ -369,6 +393,13 @@ void draw_poly(canvas *c, const float *xy, int n, const draw_poly_style *st)
         float py = (float)j + 0.5f;
         uint32_t *row = c->px + (size_t)j * (size_t)c->stride;
         int stop_l = ix1, from_r = ix1;
+        /* Hatch phase along the row (lines of constant x + y), stepped one pixel at a time. */
+        float hs = 0;
+        if (st->hatch_a > 0) {
+            hs = fmodf((float)ix0 + 0.5f + py - bx0 - by1, gap);
+            if (hs < 0)
+                hs += gap;
+        }
         {
             for (int i = ix0; i < ix1; i++) { /* find the first inside pixel from the left */
                 float px = (float)i + 0.5f, d = -1e9f;
@@ -396,7 +427,7 @@ void draw_poly(canvas *c, const float *xy, int n, const draw_poly_style *st)
                 }
             }
         }
-        for (int i = ix0; i < ix1; i++) {
+        for (int i = ix0; i < ix1; i++, hs = hs + 1.0f >= gap ? hs + 1.0f - gap : hs + 1.0f) {
             if (i >= stop_l && i < from_r) {
                 if (outline_only) {
                     i = from_r - 1;
@@ -406,10 +437,7 @@ void draw_poly(canvas *c, const float *xy, int n, const draw_poly_style *st)
                 if (st->fill_a > 0)
                     v = draw_mix(v, st->fill, (int)(st->fill_a * 1.0f + 0.5f));
                 if (st->hatch_a > 0) {
-                    float s = fmodf((float)i + 0.5f + py - bx0 - by1, gap);
-                    if (s < 0)
-                        s += gap;
-                    float across = fminf(s, gap - s) * 0.70710678f;
+                    float across = fminf(hs, gap - hs) * 0.70710678f;
                     float hc = clampf01(hwid * 0.5f + 0.5f - across);
                     if (hc > 0)
                         v = draw_mix(v, st->hatch, (int)(st->hatch_a * hc * 1.0f + 0.5f));
@@ -425,20 +453,22 @@ void draw_poly(canvas *c, const float *xy, int n, const draw_poly_style *st)
             }
             float in = clampf01(0.5f - d);
             uint32_t v = row[i];
+            if (st->halo_a > 0) {
+                float hc = clampf01(hh + 0.5f - fabsf(d));
+                if (hc > 0)
+                    v = draw_mix(v, st->halo, (int)(st->halo_a * hc + 0.5f));
+            }
             if (in > 0 && st->fill_a > 0)
                 v = draw_mix(v, st->fill, (int)(st->fill_a * in + 0.5f));
             if (in > 0 && st->hatch_a > 0) {
                 /* Lines of constant x + y, `gap` apart along x; distance across is /sqrt2. */
-                float s = fmodf(px + py - bx0 - by1, gap);
-                if (s < 0)
-                    s += gap;
-                float across = fminf(s, gap - s) * 0.70710678f;
+                float across = fminf(hs, gap - hs) * 0.70710678f;
                 float hc = clampf01(hwid * 0.5f + 0.5f - across);
                 if (hc > 0)
                     v = draw_mix(v, st->hatch, (int)(st->hatch_a * hc * in + 0.5f));
             }
             if (st->edge_a > 0) {
-                float ec = clampf01(hw + 0.5f - fabsf(d));
+                float ec = clampf01(he + 0.5f - fabsf(d));
                 if (ec > 0)
                     v = draw_mix(v, st->edge, (int)(st->edge_a * ec + 0.5f));
             }

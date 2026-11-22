@@ -449,11 +449,14 @@ build/hud_display ... --theme classic     # or "theme": "classic" in the config'
 cd ~/seeker/drafts/pi-lane && THEME=classic sh scripts/run-live.sh   # or HUD_ARGS="--theme classic"
 build/hud_display ... --anim off          # still plan theme; or "anim": false in the display object
 cd ~/seeker/drafts/pi-lane && ANIM=off sh scripts/run-live.sh
+cd ~/seeker/drafts/pi-lane && ANIM=off HUD_ARGS="--handoff off" sh scripts/run-live.sh   # fully still
 ```
 
 The plan theme animates by default (state changes, people arriving and leaving, the map); all of
 it is decoration on one switch, `--anim on|off` (`display.anim`, `ANIM=` in `run-live.sh`), and off
-draws the still plan theme exactly. The classic theme never animates. Every animation runs on one
+draws the still plan theme exactly. A look change (x-ray to seen or back) still crossfades over
+250 ms with `ANIM=off`: that is the handoff's, not an animation. Fully still is `ANIM=off` plus
+`HUD_ARGS="--handoff off"`. The classic theme never animates. Every animation runs on one
 timestamp per frame, `hud_state.now_ms`, which `hud_render` hands to all three modules.
 
 | Plan theme shows | Means |
@@ -473,7 +476,8 @@ drawn in full on that frame, and nobody's drawn position or size is eased beyond
 box smoothing. Entering an alert, the frame, plate edge and words turn magenta at once and the
 plate hatch sweeps in from the bottom-left corner (from 20%, full by 200 ms). Person down (in view,
 or behind a wall on the ghost's hull) adds one ring ping out from the frame (500 ms), then a calm
-breathing pulse of the frame (1.2 s, alpha 70% to 100%). Leaving an alert, the colours blend back
+breathing pulse of the frame (1.2 s, alpha 70% to 100%); behind a wall that pulse is one solid
+magenta outline on the hull. Leaving an alert, the colours blend back
 over 200 ms. A title block cell whose words change crossfades over 150 ms (the new value starts at
 60%); a change of digits only (the clock, "1.2 s late", fps) swaps at once. Warning plates slide 8
 px in from above while fading in (150 ms) and leave the same way. Everything runs on one timestamp
@@ -488,15 +492,15 @@ decoration only: a person's frame or ghost is always drawn where they are on tha
 seen person: the whole frame shows faintly at once and its corners trace closed (180 ms), then the
 leader draws out (120 ms), then the plate fades and slides in (120 ms). A new person behind a wall:
 the ghost starts at 60% and is full in 150 ms, the hull hatch sweeps in from the bottom left
-(220 ms), then leader and plate. A person no longer drawn leaves a fading echo of their last frame or
-ghost for 220 ms (50% to 0, no plate). Hidden-person dashes march slowly (12 px/s). Someone who
+(220 ms), then leader and plate. A person gone from fusion's tracks leaves a fading echo of their
+last frame or ghost for 220 ms (50% to 0, no plate); one still tracked but not drawn in view (out of
+the view, a duplicate) leaves none. Hidden-person dashes march slowly (12 px/s). Someone who
 comes back within 2 s keeps their plate up. Words and distances are never animated.
-A person who changes look (x-ray ghost to seen box or back) is the handoff's job: with the handoff
-on, its 250 ms crossfade alone sets the opacity of both looks, so the ghost's 60% start and the
-corner trace are not played on top of it (no double fade); the hatch sweep, the marching dashes and
-the halos still style the looks while they dissolve, and the alert ring goes with the new look
-only. With `--handoff off` there is no crossfade and the look change plays the person animation
-(trace or ghost fade) instead. `--anim off` leaves exactly the handoff crossfade.
+A person who changes look (x-ray ghost to seen box or back) is the handoff's job, never a person
+animation: the 250 ms crossfade alone sets the opacity of both looks (no double fade), the old
+ghost's dashes keep marching while it fades, and the alert decoration (tint, pulse, ring, hull
+outline) goes with the new look only, scaled by its share of the crossfade. With `--handoff off`
+the look just changes. `--anim off` leaves exactly the handoff crossfade.
 `tools/hud_shot --person-seq appear|xray|lost|all` renders the animations frame by frame (`--perf`
 times them); the stills are drawn settled.
 
