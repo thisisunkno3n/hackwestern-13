@@ -5,7 +5,7 @@
  *   hud_fusion [--config config/seeker.json] [--debug] [--run-for <s>] [--no-health]
  *              [--no-smooth] [--smooth-alpha a] [--smooth-beta b] [--smooth-gate m]
  *              [--no-range-smooth] [--no-pose-gate] [--no-pose-smooth] [--no-pose-flip] [--no-handoff]
- *              [--no-crouch-range]
+ *              [--no-crouch-range] [--no-occl-guard]
  *              [--pose ID=x_m,y_m,yaw_deg]... [--init-pose ID=x_m,y_m,yaw_deg]... [--poses FILE] [--pose-source message|config]
  *              [--tag-pose TAG=x_m,y_m,yaw_deg]... [--tag-frame ID=tag_x_m,tag_y_m,tag_yaw_deg]...
  *
@@ -37,6 +37,10 @@
  * and runs the old track identity code.
  * --no-crouch-range takes a crouched person's eye-to-ankle range as the phone sent it, instead
  * of with the crouch height (seeker_fusion.h SEEKER_CROUCH_EYE_ANKLE_FRAC).
+ * --no-occl-guard turns off the occlusion guard (seeker_fusion.h SEEKER_OCCL_*: a whole sighting
+ * near where the same phone just saw part of someone held partial, skeleton joints off the frame or
+ * guessed in a partial view not taken, confirmed joint jumps, no glide from where an unseen person
+ * would have walked on). The guard needs the handoff.
  * --no-pose-smooth takes every live message pose as is (no One Euro, SEEKER_POSE_*_CUTOFF).
  * --no-pose-gate turns off the jump gate on live message poses (seeker_fusion.h): every full
  * message pose is then taken at once, one-frame tag flips included.
@@ -112,7 +116,8 @@ static void usage(const char *argv0)
             "usage: %s [--config f] [--debug] [--run-for s] [--no-health]\n"
             "          [--no-smooth] [--smooth-alpha 0..1] [--smooth-beta 0..1] [--smooth-gate m]\n"
             "          [--no-range-smooth] [--no-pose-gate] [--no-pose-smooth] [--no-pose-flip] [--no-handoff]\n"
-            "          [--no-crouch-range] [--no-skel-smooth] [--person-h m] [--range-scale ID=k] [--no-range-hfov]\n"
+            "          [--no-crouch-range] [--no-occl-guard]\n"
+            "          [--no-skel-smooth] [--person-h m] [--range-scale ID=k] [--no-range-hfov]\n"
             "          [--cam-h ID=m] [--cam-pitch ID=deg] [--ground-range]\n"
             "          [--wearer-node ID] [--predict-ms N] [--hfov ID=deg|preset]...\n"
             "          [--pose ID=x_m,y_m,yaw_deg]... [--init-pose ID=x_m,y_m,yaw_deg]... [--poses FILE] [--pose-source message|config]\n"
@@ -142,7 +147,7 @@ int main(int argc, char **argv)
     int debug = 0, use_health = 1;
     double run_for = 0;
     int no_smooth = 0, no_range_smooth = 0, no_pose_gate = 0, no_skel_smooth = 0, predict_ms = -1;
-    int no_pose_smooth = 0, no_pose_flip = 0, no_handoff = 0, no_crouch_range = 0;
+    int no_pose_smooth = 0, no_pose_flip = 0, no_handoff = 0, no_crouch_range = 0, no_occl_guard = 0;
     const char *wearer_node = NULL;
     const char *hfov_args[SEEKER_MAX_NODES];
     int n_hfov = 0;
@@ -221,6 +226,8 @@ int main(int argc, char **argv)
             no_handoff = 1;
         else if (!strcmp(argv[i], "--no-crouch-range"))
             no_crouch_range = 1;
+        else if (!strcmp(argv[i], "--no-occl-guard"))
+            no_occl_guard = 1;
         else if (!strcmp(argv[i], "--no-skel-smooth"))
             no_skel_smooth = 1;
         else if (!strcmp(argv[i], "--wearer-node") && i + 1 < argc)
@@ -292,6 +299,7 @@ int main(int argc, char **argv)
     fus.pose_flip = !no_pose_flip;
     fus.handoff = !no_handoff;
     fus.crouch_range = !no_crouch_range;
+    fus.occl_guard = !no_occl_guard && !no_handoff;
     fus.skel_smooth = !no_skel_smooth;
     for (int i = 0; i < n_hfov; i++) {
         char id[SEEKER_NODE_LEN];
@@ -500,6 +508,14 @@ int main(int argc, char **argv)
                    SEEKER_CROUCH_EYE_ANKLE_FRAC, SEEKER_STAND_EYE_ANKLE_FRAC);
     else
         seeker_log("crouch range: off (--no-crouch-range), ranges as the phones sent them");
+    if (fus.occl_guard)
+        seeker_log("occlusion guard: a whole sighting within %.0f deg of a part seen in the last %d ms held "
+                   "partial for %d messages, joints off the frame or under %.1f in a partial view not "
+                   "taken, joint jumps confirmed, handoff glide from at most %d ms ahead",
+                   SEEKER_OCCL_BEARING_DEG, SEEKER_OCCL_HOLD_MS, SEEKER_OCCL_WHOLE_N - 1, SEEKER_OCCL_FRAG_VIS,
+                   cfg.predict_ms);
+    else
+        seeker_log("occlusion guard: off%s", no_handoff ? " (needs the handoff)" : " (--no-occl-guard)");
     if (fus.skel_smooth)
         seeker_log("skeletons (pts): One Euro per joint (min cutoff %.1f Hz, beta %.1f), joints "
                    "under visibility %.2f held %d ms, whole skeleton held %d ms, up to %d per "
