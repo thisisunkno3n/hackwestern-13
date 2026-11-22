@@ -45,7 +45,6 @@ void seeker_fusion_init(seeker_fusion *f, const seeker_config *cfg)
     f->handoff = 1;
     f->crouch_range = 1;
     f->occl_guard = 1;
-    f->part_keep = 1;
     seeker_tri_defaults(&f->tri);
     f->tri.assoc_m = cfg->assoc_m;
     f->tri.bearing_sigma_deg = cfg->tri_bearing_sigma_deg;
@@ -182,7 +181,6 @@ int seeker_fusion_set_hfov(seeker_fusion *f, const char *id, const char *spec)
 /* --hfov: rescale the bearings the phone computed with its own FOV to the real one. */
 static float contact_ground_range(const seeker_fusion_node *n, const seeker_contact *c);
 static int contact_partial(const seeker_contact *c, int w, int h);
-static int contact_frame_cut(const seeker_contact *c);
 
 /* The phone's bearings and box-height ranges with its real FOV (--hfov), the real people's
  * height (--person-h, phone.html assumes SEEKER_SKEL_PERSON_M) and a per-phone factor
@@ -599,59 +597,166 @@ static void step_pose(seeker_fusion *f, seeker_fusion_node *n, int64_t now)
     }
 }
 
-/* SEEKER_CROUCH_*: the factor for contact c's range (1 unless phone.html ranged it from eye to
- * ankle and its landmarks are crouched): the eye-to-ankle height the phone measured over the one
- * the person would have standing, from their own body in the same picture; why gets the posture
- * features. */
-static float crouch_range_k(const seeker_contact *c, int w, int h, char *why, int whysz)
+/* SEEKER_BODY_*: the factor for a contact's range, 1 for a whole standing person. phone.html
+ * ranges from one length in the picture: eye to ankle, else the torso, else the box of what it
+ * sees. Crouching or bending makes eye to ankle shorter than the person and the range reads long
+ * (2.1 m read 4.3 m while crouched, Pi run of 2026-11-22), which throws the track along that
+ * phone's ray; a box of a part of someone reads longer still. No posture label is used:
+ *   - Feet: while a contact's ankles stay on the same row of the picture (SEEKER_BODY_FEET_TOL)
+ *     the person has not moved toward or away from the phone, so a height that drops under
+ *     SEEKER_BODY_SAME of the tallest seen there is the person folding, and the range is scaled
+ *     by the two heights.
+ *   - Body: with no such reference (first seen crouched, feet moved), the height is taken from
+ *     the part the view shortens least (torso, shoulder line, thigh, shin, each over its share
+ *     of a standing height) and the range is scaled by the height used over that.
+ *   - A range from the box keeps the contact's last range from a body length for
+ *     SEEKER_BODY_TRUST_MS, else the shoulder line stands in.
+ * A range from the torso is left as sent. why gets the numbers. */
+typedef struct {
+    const char *src;
+    float used, body, ankle_y;
+    int feet;
+} body_meas;
+
+static int body_measure(const seeker_contact *c, int w, int h, body_meas *m)
 {
+    memset(m, 0, sizeof *m);
     if (!c->has_pts || !c->has_range || w <= 0 || h <= 0)
-        return 1.0f;
+        return 0;
     const float(*p)[3] = c->pts;
     const float v = 0.5f; /* phone.html VIS_MIN */
-    int eyes = (p[1][2] > v) + (p[2][2] > v), ankles = (p[15][2] > v) + (p[16][2] > v);
-    if ((!eyes && !(p[0][2] > v)) || !ankles)
-        return 1.0f; /* ranged from the torso or the box */
-    float px[SEEKER_N_JOINTS][3];
+    float px[SEEKER_N_JOINTS][2];
+    int in[SEEKER_N_JOINTS]; /* seen and inside the frame: a joint to measure from */
     for (int j = 0; j < SEEKER_N_JOINTS; j++) {
         px[j][0] = p[j][0] * (float)w;
         px[j][1] = p[j][1] * (float)h;
-        px[j][2] = p[j][2];
+        in[j] = p[j][2] > v && p[j][0] > 0.005f && p[j][0] < 0.995f && p[j][1] > 0.005f &&
+                p[j][1] < 0.995f;
     }
-    float tx = px[0][0], ty = px[0][1], ax = 0, ay = 0; /* phone.html personHeightPx */
-    if (eyes) {
-        tx = ty = 0;
-        for (int j = 1; j <= 2; j++)
+#define SEG(a, b) hypotf(px[a][0] - px[b][0], px[a][1] - px[b][1])
+    /* the length phone.html ranged from (personHeightPx), as a standing height in px */
+    int eyes = (p[1][2] > v) + (p[2][2] > v), ankles = (p[15][2] > v) + (p[16][2] > v);
+    if (ankles && (eyes || p[0][2] > v)) {
+        float tx = px[0][0], ty = px[0][1], ax = 0, ay = 0;
+        if (eyes) {
+            tx = ty = 0;
+            for (int j = 1; j <= 2; j++)
+                if (p[j][2] > v)
+                    tx += px[j][0] / (float)eyes, ty += px[j][1] / (float)eyes;
+        }
+        for (int j = 15; j <= 16; j++)
             if (p[j][2] > v)
-                tx += px[j][0] / (float)eyes, ty += px[j][1] / (float)eyes;
+                ax += px[j][0] / (float)ankles, ay += px[j][1] / (float)ankles;
+        m->used = hypotf(tx - ax, ty - ay) / SEEKER_STAND_EYE_ANKLE_FRAC;
+        m->src = "eye to ankle";
+        m->feet = (in[15] || !(p[15][2] > v)) && (in[16] || !(p[16][2] > v));
+        m->ankle_y = ay / (float)h;
+    } else if (p[5][2] > v && p[6][2] > v && p[11][2] > v && p[12][2] > v) {
+        m->src = "torso";
+    } else if (c->has_box && c->box[3] > 0) {
+        m->used = c->box[3];
+        m->src = "box";
+    } else {
+        return 0;
     }
-    for (int j = 15; j <= 16; j++)
-        if (p[j][2] > v)
-            ax += px[j][0] / (float)ankles, ay += px[j][1] / (float)ankles;
-    float seen = hypotf(tx - ax, ty - ay);
-    seeker_posture_mask_offframe(px, p);
-    seeker_posture_feat ft;
-    if (!seeker_posture_features((const float(*)[3])px, &ft) ||
-        seeker_posture_classify(&ft, SEEKER_POSTURE_UNKNOWN) != SEEKER_POSTURE_CROUCH)
+    if (in[5] && in[6]) {
+        m->body = SEG(5, 6) / SEEKER_BODY_SHOULDER_FRAC;
+        if (in[11] && in[12])
+            m->body = fmaxf(m->body, hypotf(0.5f * (px[5][0] + px[6][0] - px[11][0] - px[12][0]),
+                                            0.5f * (px[5][1] + px[6][1] - px[11][1] - px[12][1])) /
+                                         SEEKER_BODY_TORSO_FRAC);
+    }
+    static const int leg[2][3] = { { 11, 13, 15 }, { 12, 14, 16 } };
+    for (int s = 0; s < 2; s++) {
+        if (in[leg[s][0]] && in[leg[s][1]])
+            m->body = fmaxf(m->body, SEG(leg[s][0], leg[s][1]) / SEEKER_BODY_LEG_SEG_FRAC);
+        if (in[leg[s][1]] && in[leg[s][2]])
+            m->body = fmaxf(m->body, SEG(leg[s][1], leg[s][2]) / SEEKER_BODY_LEG_SEG_FRAC);
+    }
+#undef SEG
+    return 1;
+}
+
+/* Body: the height used over the person's own parts. A standing person reads 0.84 to 0.94 on
+ * the real phones (the parts over these shares come out a little taller than eye to ankle).
+ * Nothing changes down to SEEKER_BODY_K_KEEP; from SEEKER_BODY_K_FULL down the range is scaled
+ * in proportion; in between the two blend, so the range never steps. */
+static float body_ratio_k(const body_meas *m)
+{
+    if (m->used < 5.0f || m->body < 5.0f)
         return 1.0f;
-    /* The person's height in px from what the view shortens least: thigh or shin (side on), the
-     * torso, the shoulder line (facing the phone). */
-    float body = 0;
-    for (int s = 0; s < 2; s++)
-        if (ft.leg[s].ok)
-            body = fmaxf(body, ft.leg[s].seg / SEEKER_BODY_LEG_SEG_FRAC);
-    if (px[5][2] > v && px[6][2] > v) { /* px: joints off the frame are masked */
-        body = fmaxf(body, hypotf(px[5][0] - px[6][0], px[5][1] - px[6][1]) / SEEKER_BODY_SHOULDER_FRAC);
-        if (px[11][2] > v && px[12][2] > v)
-            body = fmaxf(body, hypotf(0.5f * (px[5][0] + px[6][0] - px[11][0] - px[12][0]),
-                                      0.5f * (px[5][1] + px[6][1] - px[11][1] - px[12][1])) /
-                                   SEEKER_BODY_TORSO_FRAC);
+    float r = m->used / m->body;
+    if (r >= SEEKER_BODY_K_KEEP)
+        return 1.0f;
+    float t = r <= SEEKER_BODY_K_FULL ? 1.0f
+                                      : (SEEKER_BODY_K_KEEP - r) / (SEEKER_BODY_K_KEEP - SEEKER_BODY_K_FULL);
+    float k = 1.0f + t * (r / SEEKER_BODY_STAND_K - 1.0f);
+    return k < SEEKER_BODY_K_MIN ? SEEKER_BODY_K_MIN : k;
+}
+
+static seeker_body_ref *body_ref(seeker_fusion_node *n, const char *id, int64_t now_ms)
+{
+    seeker_body_ref *old = &n->body[0];
+    for (int i = 0; i < SEEKER_BODY_REFS; i++) {
+        seeker_body_ref *b = &n->body[i];
+        if (b->ms && !strcmp(b->id, id))
+            return b;
+        if (b->ms < old->ms)
+            old = b;
     }
-    seeker_posture_describe(&ft, why, whysz);
-    float k = body > 1.0f ? seen / (SEEKER_STAND_EYE_ANKLE_FRAC * body)
-                          : SEEKER_CROUCH_EYE_ANKLE_FRAC / SEEKER_STAND_EYE_ANKLE_FRAC;
-    float lo = SEEKER_CROUCH_EYE_ANKLE_MIN / SEEKER_STAND_EYE_ANKLE_FRAC;
-    return k < lo ? lo : k > 1.0f ? 1.0f : k;
+    memset(old, 0, sizeof *old);
+    snprintf(old->id, sizeof old->id, "%s", id);
+    old->ms = now_ms;
+    return old;
+}
+
+static float crouch_range_k(seeker_fusion_node *n, const seeker_contact *c, int64_t now_ms,
+                            char *why, int whysz)
+{
+    body_meas m;
+    if (!body_measure(c, n->image_w, n->image_h, &m))
+        return 1.0f;
+    seeker_body_ref *b = body_ref(n, c->id, now_ms);
+    float k = 1.0f;
+    if (m.src[0] == 'e') {
+        int same = b->has_feet && m.feet && now_ms - b->ms <= SEEKER_BODY_TRUST_MS &&
+                   fabsf(m.ankle_y - b->ankle_y) <= SEEKER_BODY_FEET_TOL;
+        if (same && m.used < SEEKER_BODY_SAME * b->used) {
+            k = m.used / b->used;
+            snprintf(why, (size_t)whysz, "feet on the same row, height %.0f of %.0f px", m.used, b->used);
+        } else if (same) {
+            b->used = fmaxf(b->used, m.used);
+        } else {
+            k = body_ratio_k(&m);
+            if (k < 1.0f)
+                snprintf(why, (size_t)whysz, "eye to ankle reads %.0f px of a %.0f px person", m.used, m.body);
+            b->has_feet = m.feet;
+            b->ankle_y = m.ankle_y;
+            b->used = m.used / k;
+        }
+        k = k < SEEKER_BODY_K_MIN ? SEEKER_BODY_K_MIN : k;
+        b->ms = now_ms;
+        b->trust_ms = now_ms;
+        b->trust_range = c->range_m * k;
+    } else if (m.src[0] == 't') {
+        b->ms = now_ms;
+        b->has_feet = 0;
+        b->trust_ms = now_ms;
+        b->trust_range = c->range_m;
+    } else {
+        b->ms = now_ms;
+        b->has_feet = 0;
+        if (b->trust_ms && now_ms - b->trust_ms <= SEEKER_BODY_TRUST_MS && b->trust_range < c->range_m) {
+            k = b->trust_range / c->range_m;
+            snprintf(why, (size_t)whysz, "box of a part, range kept from %lld ms ago",
+                     (long long)(now_ms - b->trust_ms));
+        } else {
+            k = body_ratio_k(&m);
+            if (k < 1.0f)
+                snprintf(why, (size_t)whysz, "box reads %.0f px of a %.0f px person", m.used, m.body);
+        }
+    }
+    return k;
 }
 
 static void apply_crouch_range(seeker_fusion_node *n, int64_t now_ms)
@@ -659,17 +764,13 @@ static void apply_crouch_range(seeker_fusion_node *n, int64_t now_ms)
     for (int i = 0; i < n->last.n; i++) {
         seeker_contact *c = &n->last.c[i];
         char why[160] = "";
-        if (n->part[i] & (3 | SEEKER_PART_CUT))
-            continue; /* a part, or cut by an edge: the legs are the pose model's guess. A whole
-                       * sighting near where a part just was (bit 4 alone) is still corrected. */
-        float k = crouch_range_k(c, n->image_w, n->image_h, why, sizeof why);
-        if (k == 1.0f)
+        float k = crouch_range_k(n, c, now_ms, why, sizeof why);
+        if (k >= 0.999f)
             continue;
-        if (!n->crouch_ranges || now_ms - n->crouch_log_ms >= 5000) {
+        if (!n->crouch_ranges || now_ms - n->crouch_log_ms >= 2000) {
             n->crouch_log_ms = now_ms;
-            seeker_log("NODE %s crouch range %s: eye-to-ankle range %.2f m taken as crouched, "
-                       "%.2f m (x%.2f; %s; %ld so far)", n->id, c->id, c->range_m, c->range_m * k,
-                       k, why, n->crouch_ranges + 1);
+            seeker_log("NODE %s body range %s: %.2f m as sent, %.2f m (x%.2f; %s; %ld so far)", n->id,
+                       c->id, c->range_m, c->range_m * k, k, why, n->crouch_ranges + 1);
         }
         c->range_m *= k;
         n->crouch_ranges++;
@@ -683,16 +784,14 @@ static void mark_partial(seeker_fusion *f, seeker_fusion_node *n, int64_t now_ms
     for (int i = 0; i < n->last.n; i++) {
         const seeker_contact *c = &n->last.c[i];
         int part = f->handoff && contact_partial(c, n->image_w, n->image_h);
-        /* SEEKER_PART_CUT: the frame cuts them, no wall does. The node sees this person. */
-        int cut = part && contact_frame_cut(c);
         if (f->handoff && f->occl_guard) {
             int near = n->frag_ms && now_ms - n->frag_ms <= SEEKER_OCCL_HOLD_MS &&
                        fabsf(seeker_wrap180(c->bearing_deg - n->frag_bearing)) <= SEEKER_OCCL_BEARING_DEG;
-            if (part && !cut) {
+            if (part) {
                 n->frag_ms = now_ms;
                 n->frag_bearing = c->bearing_deg;
                 n->frag_whole = 0;
-            } else if (!part && near && ++n->frag_whole < SEEKER_OCCL_WHOLE_N) {
+            } else if (near && ++n->frag_whole < SEEKER_OCCL_WHOLE_N) {
                 part = 2;
                 if (n->frag_whole == 1)
                     seeker_log("NODE %s occl: whole sighting %s at %.1f deg held partial, part of someone "
@@ -702,21 +801,7 @@ static void mark_partial(seeker_fusion *f, seeker_fusion_node *n, int64_t now_ms
             }
             part |= near || part ? 4 : 0;
         }
-        n->part[i] = (unsigned char)(part | (cut ? SEEKER_PART_CUT : 0));
-        n->cut_n += cut;
-        if ((part & 3) && (!n->part_log_ms || now_ms - n->part_log_ms >= 5000)) {
-            /* Why a person in a phone's view is not one it "sees": the numbers the rules read. */
-            const float(*p)[3] = c->pts;
-            n->part_log_ms = now_ms;
-            seeker_log("NODE %s part: %s at %.1f deg %s (head %.2f, shoulders %.2f %.2f, hips %.2f %.2f, "
-                       "ankles %.2f %.2f at rows %.2f %.2f; %ld cut by the frame so far)",
-                       n->id, c->id, c->bearing_deg,
-                       cut ? "is cut by the frame: still seen by this phone, ranged by bearing"
-                       : part & 2 ? "is whole but held as part of a body (occlusion guard)"
-                                  : "shows part of a body: ranged by bearing, not one of the track's phones while another sees them whole",
-                       fmaxf(p[0][2], fmaxf(p[1][2], p[2][2])), p[5][2], p[6][2], p[11][2], p[12][2],
-                       p[15][2], p[16][2], p[15][1], p[16][1], n->cut_n);
-        }
+        n->part[i] = (unsigned char)part;
     }
 }
 
@@ -754,10 +839,10 @@ int seeker_fusion_ingest(seeker_fusion *f, const seeker_remote_contacts *m, int6
     }
     if (m->hfov_deg > 0)
         n->hfov_deg = m->hfov_deg;
-    apply_hfov(f, n, m);
-    mark_partial(f, n, now_ms); /* after apply_hfov: its bearing window is in real degrees */
     if (f->crouch_range)
         apply_crouch_range(n, now_ms);
+    apply_hfov(f, n, m);
+    mark_partial(f, n, now_ms);
     return (int)(n - f->nodes);
 }
 
@@ -1007,18 +1092,6 @@ static int contact_partial(const seeker_contact *c, int w, int h)
     return 1;
 }
 
-/* SEEKER_PART_CUT: a partial contact that is an upper body the bottom of the frame cuts: the head
- * and both shoulders seen, both ankles placed at the bottom edge or below it. Nothing hides this
- * person from the phone, they stand too close for its frame (within about 2.7 m of a landscape
- * phone at chest height). Their size range is still that of a part (the box of what shows). */
-static int contact_frame_cut(const seeker_contact *c)
-{
-    const float(*p)[3] = c->pts;
-    const float v = 0.5f;
-    return c->has_pts && (p[0][2] > v || p[1][2] > v || p[2][2] > v) && p[5][2] > v && p[6][2] > v &&
-           p[15][1] >= SEEKER_PART_CUT_ROW && p[16][1] >= SEEKER_PART_CUT_ROW;
-}
-
 static const char *wearer_id(const seeker_config *cfg)
 {
     return cfg->wearer_node[0] ? cfg->wearer_node : cfg->view_node;
@@ -1027,8 +1100,7 @@ static const char *wearer_id(const seeker_config *cfg)
 /* Fills one track's identity fields from a triangulation cluster of contacts (ray index -> node,
  * contact). Returns the member count; nodes[0] is the primary node, then the others. The track's
  * node list names only the nodes that see the whole person (all of them when none does); mask
- * gets the same nodes as bits, and wearer_part is set for a lone partial contact: 1 the wearer's,
- * 2 another phone's. */
+ * gets the same nodes as bits, and wearer_part is set for a lone partial contact of the wearer. */
 static int place_cluster(const seeker_fusion *f, const seeker_tri_cluster *cl, const seeker_ray *rays,
                          const int *ray_node, const int *ray_idx, int64_t now_ms, seeker_track *k,
                          const seeker_fusion_node **nodes, const seeker_contact **primary_contact,
@@ -1052,10 +1124,7 @@ static int place_cluster(const seeker_fusion *f, const seeker_tri_cluster *cl, c
     *wearer_part = 0;
     for (int m = 0; m < cl->n; m++) {
         const seeker_fusion_node *mn = &f->nodes[ray_node[cl->member[m]]];
-        /* Not one of the track's nodes: a view of part of them while another sees them whole,
-         * unless it is only the frame that cuts them (SEEKER_PART_CUT: that phone sees them). */
-        int part = whole > 0 && rays[cl->member[m]].partial &&
-                   !(mn->part[ray_idx[cl->member[m]]] & SEEKER_PART_CUT);
+        int part = whole > 0 && rays[cl->member[m]].partial;
         if (!part) {
             ids[nid++] = mn->id;
             *mask |= 1u << ray_node[cl->member[m]];
@@ -1063,8 +1132,8 @@ static int place_cluster(const seeker_fusion *f, const seeker_tri_cluster *cl, c
         labels[m] = mn->last.c[ray_idx[cl->member[m]]].id;
         if (!strcmp(mn->id, cfg->view_node) && !part)
             primary = cl->member[m];
-        if (cl->n == 1 && rays[cl->member[m]].partial)
-            *wearer_part = !strcmp(mn->id, wearer_id(cfg)) ? 1 : 2;
+        if (cl->n == 1 && rays[cl->member[m]].partial && !strcmp(mn->id, wearer_id(cfg)))
+            *wearer_part = 1;
         int age = (int)(now_ms - mn->last_rx_ms);
         if (age > k->age_ms)
             k->age_ms = age;
@@ -1159,16 +1228,8 @@ static int labels_share(const char *a, const char *b)
     return 0;
 }
 
-/* Does a lone partial sighting (wpart: 1 the wearer's, 2 another phone's) continue track m by its
- * bearing, at the track's distance? The wearer's always; another phone's once the track has been
- * ranged from a whole body (SEEKER_OCCL_*, part_keep): the part's size range is not the person's. */
-static int part_by_bearing(const seeker_fusion *f, const seeker_fusion_mem *m, int wpart)
-{
-    return wpart == 1 || (wpart == 2 && f->occl_guard && f->part_keep && m->ranged_whole);
-}
-
-/* Gate and cost of cluster cl for live track m predicted at pr. A lone partial sighting that goes
- * by bearing (part_by_bearing): the track's predicted spot must sit on its ray. Anything else with a
+/* Gate and cost of cluster cl for live track m predicted at pr. A lone partial sighting of the
+ * wearer goes by bearing: the track's predicted spot must sit on its ray. Anything else with a
  * position: Mahalanobis distance with the fix's and the track's covariance plus track_sigma_m
  * of motion, within track_gate_sigmas (one more when the node set changes) and
  * track_gate_max_m; a shared phone contact id is enough within track_gate_max_m. The old
@@ -1179,7 +1240,7 @@ static void handoff_gate(const seeker_fusion *f, const seeker_fusion_mem *m, con
 {
     const seeker_config *cfg = f->cfg;
     float ts2 = cfg->track_sigma_m * cfg->track_sigma_m;
-    if (part_by_bearing(f, m, wpart)) {
+    if (wpart) {
         const seeker_ray *ry = &rays[cl->member[0]];
         float b = ry->bearing_deg * DEG2RAD, ux = sinf(b), uy = cosf(b);
         float vx = pr->x_m - ry->x_m, vy = pr->y_m - ry->y_m;
@@ -1190,8 +1251,7 @@ static void handoff_gate(const seeker_fusion *f, const seeker_fusion_mem *m, con
         float tn = m->cxx * uy * uy - 2.0f * m->cxy * ux * uy + m->cyy * ux * ux;
         float s2 = sb * sb + tn + ts2, g = cfg->track_gate_sigmas + 1.0f;
         *tok = cross * cross <= g * g * s2 && fabsf(cross) <= cfg->track_gate_max_m;
-        /* Another phone's part: a cluster with a position of its own keeps the track first. */
-        *cost = cross * cross / s2 + (wpart == 2 ? SEEKER_OCCL_PART_COST : 0.0);
+        *cost = cross * cross / s2;
         return;
     }
     const seeker_fix *fx = &cl->fix;
@@ -1254,16 +1314,14 @@ static void learn_range_ratio(const seeker_fusion *f, seeker_fusion_mem *mm, con
     }
 }
 
-/* The track's node set changes (another phone takes over or joins), or the phone that kept it by
- * bearing from a part of the person now ranges them (same_nodes: the same node set counts), and
- * the new fix is more than SEEKER_HANDOFF_MIN_M from where the track was drawn: the filters move
- * to the new fix and keep their velocity (a change of measurement is not motion: no velocity
- * kick, no slow slide, no lag on someone still walking), and (hx, hy) gets the old position for
- * the glide. Returns 1 then. */
-static int handoff_start(const seeker_fusion *f, seeker_fusion_mem *mm, unsigned mask, int same_nodes, float x,
-                         float y, int64_t now_ms, float *hx, float *hy)
+/* The track's node set changes (another phone takes over or joins) and the new fix is more than
+ * SEEKER_HANDOFF_MIN_M from where the track was drawn: the filters move to the new fix and keep
+ * their velocity (a change of measurement is not motion: no velocity kick, no slow slide, no lag
+ * on someone still walking), and (hx, hy) gets the old position for the glide. Returns 1 then. */
+static int handoff_start(const seeker_fusion *f, seeker_fusion_mem *mm, unsigned mask, float x, float y,
+                         int64_t now_ms, float *hx, float *hy)
 {
-    if (!mm->node_mask || (mask == mm->node_mask && !same_nodes) || !mm->ab.valid || !mm->has_pos ||
+    if (!mm->node_mask || mask == mm->node_mask || !mm->ab.valid || !mm->has_pos ||
         now_ms - mm->seen_ms > f->cfg->smooth_reset_ms)
         return 0;
     predict(f, mm, now_ms, hx, hy);
@@ -1408,10 +1466,6 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
     for (int i = 0; i < SEEKER_FUSION_MEM; i++) {
         seeker_fusion_mem *m = &f->mem[i];
         m->matched = 0;
-        /* part_keep: a whole-body distance stands in for a part's only this long; after it the
-         * person may have walked on along the ray, and the part's own range is all there is */
-        if (m->ranged_whole && now_ms - m->whole_ms > SEEKER_PART_KEEP_MS)
-            m->ranged_whole = 0;
         if (m->id && m->has_pos && now_ms - m->seen_ms <= cfg->drop_ms) {
             predict(f, m, now_ms, &pri[nlive].x_m, &pri[nlive].y_m);
             live[nlive++] = i;
@@ -1437,7 +1491,6 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
     double tcost[SEEKER_FUSION_MEM * SEEKER_MAX_TRACKS];
     unsigned char tok[SEEKER_FUSION_MEM * SEEKER_MAX_TRACKS];
     int row_col[SEEKER_FUSION_MEM], cl_mem[SEEKER_MAX_TRACKS];
-    int bfix[SEEKER_MAX_TRACKS] = { 0 }; /* a lone partial sighting placed by bearing_fix */
     for (int a = 0; a < nout; a++)
         cl_mem[a] = -1;
     for (int r = 0; r < nlive; r++)
@@ -1467,10 +1520,9 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
             if (row_col[r] >= 0) {
                 cl_mem[row_col[r]] = live[r];
                 f->mem[live[r]].matched = 1;
-                const seeker_fusion_mem *lm = &f->mem[live[r]];
-                if (part_by_bearing(f, lm, wpart[row_col[r]])) { /* on its bearing, at the track's distance */
+                if (wpart[row_col[r]]) { /* on the wearer's bearing, at the track's distance */
                     seeker_tri_prior at = pri[r];
-                    bfix[row_col[r]] = 1;
+                    const seeker_fusion_mem *lm = &f->mem[live[r]];
                     if (f->occl_guard && lm->ab.valid)
                         at.x_m = lm->ab.x, at.y_m = lm->ab.y;
                     bearing_fix(f, &at, &rays[cls[row_col[r]].member[0]], &cls[row_col[r]].fix);
@@ -1483,7 +1535,7 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
     for (int a = 0; a < nout; a++) {
         if (cl_mem[a] >= 0)
             continue;
-        if (wpart[a] == 1) { /* the wearer sees part of someone no track is near: no new person */
+        if (wpart[a]) { /* the wearer sees part of someone no track is near: no new person */
             drop[a] = 1;
             continue;
         }
@@ -1519,9 +1571,7 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
                 seeker_node_to_room(scaled.x_m, scaled.y_m, 0, scaled.bearing_deg, scaled.range_m, &x, &y);
                 single = &scaled;
             }
-            /* Kept by bearing from another phone's part, now ranged: the distance the person
-             * walked meanwhile is a correction to glide over, like a change of phone. */
-            ho = handoff_start(f, mm, cmask[a], mm->part_fix && !bfix[a], x, y, now_ms, &hx, &hy);
+            ho = handoff_start(f, mm, cmask[a], x, y, now_ms, &hx, &hy);
         }
         if (has_room && cfg->smooth)
             smooth_track(f, mm, mnodes[a], nm, single, now_ms, &x, &y);
@@ -1535,13 +1585,8 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
                            mm->id, k->nodes, hypotf(mm->ho_x, mm->ho_y), SEEKER_HANDOFF_MS);
         }
         if (f->handoff && has_room) {
-            fix_cov(f, &cls[a].fix, single, bfix[a], &mm->cxx, &mm->cxy, &mm->cyy);
+            fix_cov(f, &cls[a].fix, single, wpart[a], &mm->cxx, &mm->cxy, &mm->cyy);
             mm->node_mask = cmask[a];
-            if (!wpart[a]) {
-                mm->ranged_whole = 1;
-                mm->whole_ms = now_ms;
-            }
-            mm->part_fix = bfix[a] && wpart[a] == 2;
         }
         mm->has_pos = has_room;
         mm->px = x;
@@ -1596,25 +1641,14 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
                                           f->skel_smooth ? 1 | (guard ? SEEKER_SKEL_CONFIRM : 0) : 0,
                                           k->pts);
             int was = mm->posture.label;
-            /* Posture from this message's own joints: the smoothed ones (One Euro, 1 Hz when
-             * still) trail a crouch by 0.3 to 0.5 s, and the votes already take out the jitter.
-             * Without a skeleton this tick, the held one. */
             float pp[SEEKER_N_JOINTS][3];
-            int pv = have || k->has_pts;
-            if (have && mm->post_node == (const void *)pn && mm->post_msgs == (long)pn->msgs) {
-                /* the same message again: raw is rescaled by the predicted distance every tick,
-                 * which would read as a new skeleton and vote again */
-                memcpy(pp, mm->post_pts, sizeof pp);
-            } else if (have) {
-                memcpy(pp, raw, sizeof pp);
-                seeker_posture_mask_offframe(pp, (const float (*)[3])sc->pts);
-                memcpy(mm->post_pts, pp, sizeof pp);
-                mm->post_node = pn;
-                mm->post_msgs = (long)pn->msgs;
-            } else if (k->has_pts) {
+            if (k->has_pts) {
                 memcpy(pp, k->pts, sizeof pp);
+                if (have)
+                    seeker_posture_mask_offframe(pp, (const float (*)[3])sc->pts);
             }
-            k->posture = seeker_posture_update(&mm->posture, pv ? (const float (*)[3])pp : NULL, now_ms);
+            k->posture = seeker_posture_update(
+                &mm->posture, k->has_pts ? (const float (*)[3])pp : NULL, now_ms);
             if (k->posture != was) {
                 char why[160];
                 seeker_posture_describe(&mm->posture.feat, why, sizeof why);

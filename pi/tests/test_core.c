@@ -5385,13 +5385,12 @@ static void test_crouch_range(void)
         printf("crouch range, %s at 2.5 m: phone %.2f m, fusion %.2f m\n", cases[i].name, sent[i],
                kept[i]);
         if (i != 1)
-            CHECK(kept[i] == sent[i]);
+            CHECK(kept[i] == sent[i]); /* standing, torso-ranged, bent over, stairs: as sent */
     }
     CHECK(sent[1] > 3.4f);                                /* the bug: about 1.5x long */
-    /* the factor is the height the phone measured over the standing one, from the person's own
-     * body in the picture (here the shoulder line, 0.24 of the standing height) */
-    CHECK(fabsf(kept[1] - 2.5f) < 0.3f && kept[1] > sent[1] * SEEKER_CROUCH_EYE_ANKLE_MIN / 0.90f &&
-          kept[1] < sent[1] * 0.8f);
+    /* nearer the truth, never under it. This template folds less than a real crouch (it reads
+     * 0.69 of the body where the real phones read about 0.45), so only part of the scaling. */
+    CHECK(kept[1] < sent[1] - 0.3f && kept[1] > 2.5f * 0.9f);
     CHECK(f.nodes[0].crouch_ranges == 1);
     /* --no-crouch-range: as the phone sent it */
     seeker_fusion_init(&f, &cfg);

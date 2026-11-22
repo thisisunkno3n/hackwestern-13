@@ -268,58 +268,6 @@ const char *wv_pose_mode_name(wv_pose_mode m)
                                                                                          : "fixed";
 }
 
-/* Is the other phone's track o the seen person d, put in the wrong place by its range? A size
- * range is only good to 10 to 30% and reads up to 2x long when the person is not standing and
- * the range correction did not catch it (ankles hidden so the phone ranged from the box, a bend,
- * the way down into a crouch); the bearing is good. The track then sits far along its own
- * phone's ray, off to one side of the person in the wearer's view, where a bearing and range
- * match from the wearer misses it. So: the other phone's ray (the line from that phone through
- * its track: its bearing, whatever the range) has to cross the wearer's line to d, in front of
- * both, at a point where each phone's range reads WV_DUP_RANGE_LO to WV_DUP_RANGE_HI times the
- * distance (to WV_DUP_RANGE_OK for a person labelled STAND) and at least one of the two reads
- * within WV_DUP_RANGE_OK. Never when the other phone also sees d (then o is a second contact of
- * that phone, another person), when two phones already fixed o, when the two lines are closer
- * to parallel than WV_DUP_CROSS_DEG (no crossing to trust; the bearing and range match
- * decides), or when o and the crossing are behind a wall and d is not. */
-static int same_on_ray(const seeker_tracks *t, const wv_config *w, const wv_pose *pose,
-                       const wv_item *o, const wv_item *d)
-{
-    const seeker_track *ko = &t->tracks[o->idx], *kd = &t->tracks[d->idx];
-    if (!ko->has_room || !kd->has_room || !d->has_range || d->range_m < 0.3f ||
-        !strcmp(ko->node_id, w->node) || wv_seen_by(kd->nodes, kd->node_id, ko->node_id))
-        return 0;
-    if (strchr(ko->nodes, '+'))
-        return 0; /* two phones crossed their bearings on it: the place is good */
-    const seeker_node_status *sn = find_node(t, ko->node_id);
-    if (!sn)
-        return 0;
-    /* wearer line: pose + s1 * u1 through d; the other phone's ray: sn + s2 * u2 */
-    float u1x = (kd->room_x_m - pose->x_m) / d->range_m, u1y = (kd->room_y_m - pose->y_m) / d->range_m;
-    /* a single-phone track sits on its phone's bearing ray: the ray is the line to the track */
-    float ro = hypotf(ko->room_x_m - sn->x_m, ko->room_y_m - sn->y_m);
-    if (ro < 0.3f)
-        return 0;
-    float u2x = (ko->room_x_m - sn->x_m) / ro, u2y = (ko->room_y_m - sn->y_m) / ro;
-    float cross = u1x * u2y - u1y * u2x;
-    if (fabsf(cross) < sinf(WV_DUP_CROSS_DEG * DEG2RAD))
-        return 0;
-    float ex = sn->x_m - pose->x_m, ey = sn->y_m - pose->y_m;
-    float s1 = (ex * u2y - ey * u2x) / cross, s2 = (ex * u1y - ey * u1x) / cross;
-    if (s1 < 0.3f || s2 < 0.3f)
-        return 0;
-    /* how long each phone's range reads if the person is at the crossing; a standing person's
-     * range is never far out, and one of the two has to be about right */
-    float e1 = d->range_m / s1, e2 = ro / s2;
-    float hi1 = kd->posture == SEEKER_POSTURE_STAND ? WV_DUP_RANGE_OK : WV_DUP_RANGE_HI;
-    float hi2 = ko->posture == SEEKER_POSTURE_STAND ? WV_DUP_RANGE_OK : WV_DUP_RANGE_HI;
-    if (e1 < WV_DUP_RANGE_LO || e1 > hi1 || e2 < WV_DUP_RANGE_LO || e2 > hi2 ||
-        (e1 > WV_DUP_RANGE_OK && e2 > WV_DUP_RANGE_OK))
-        return 0;
-    /* Someone behind a wall is never taken for a copy of a person in the open: hiding a real
-     * second person is worse than drawing one twice. */
-    return !(o->behind_wall && !d->behind_wall);
-}
-
 int wv_classify(const seeker_tracks *t, const wv_config *w, const wv_pose *pose, wv_item *items,
                 int max)
 {
@@ -417,11 +365,7 @@ int wv_classify(const seeker_tracks *t, const wv_config *w, const wv_pose *pose,
             continue;
         int best = -1;
         float best_d = w->assoc_deg;
-        for (int b = 0; w->handoff && b < n && best < 0; b++)
-            if (items[b].direct && same_on_ray(t, w, pose, o, &items[b]))
-                best = b;
-        int by_ray = best >= 0;
-        for (int b = 0; !by_ray && b < n; b++) {
+        for (int b = 0; b < n; b++) {
             const wv_item *d = &items[b];
             if (!d->direct || !d->has_bearing)
                 continue;
@@ -471,8 +415,7 @@ typedef struct {
     int n_skel;     /* x-ray people drawn as ghost skeletons */
     int n_posture[4]; /* people in view by SEEKER_POSTURE_* */
     int n_drawn;
-    int drawn[SEEKER_MAX_TRACKS][9]; /* id, direct, x, y, w, h, level, skeleton top and bottom row */
-    int skel_y0, skel_y1; /* canvas rows of the last ghost skeleton's highest and lowest joint */
+    int drawn[SEEKER_MAX_TRACKS][7]; /* id, direct, x, y, w, h, level */
     wv_view *view;  /* per-track display state (colour, eased box) */
     int plan;       /* draw_theme() == DRAW_THEME_PLAN */
     float u;        /* plan: frame height / 720 */
@@ -481,7 +424,6 @@ typedef struct {
     anim_fx fx;     /* plan: this person's alert animation (anim_alert.h), zero = none */
     int cur_slot;   /* plan: wv_view.colours slot of the person being labelled, -1 none */
     ap_fx pfx;      /* plan: the person being drawn's animation (anim_person.h), 0 = none */
-    int64_t now;    /* the frame's one timestamp (ms) */
 } rc;
 
 static int clampi(int v, int lo, int hi)
@@ -609,12 +551,6 @@ static void learn_tilt(wv_view *v, const wv_camera *cam, const seeker_tracks *t,
         if (top < 0.02f * H || bot > 0.98f * H || k->node_box[3] < 0.15f * H || it->p.box_h <= 0 ||
             it->range_m < 0.8f || it->range_m > 8.0f)
             continue;
-        /* Only a whole standing person is where the projected box is: someone crouched, or cut
-         * off at the legs by a box that stops short of the frame's edge, has a box whose middle
-         * says nothing about the tilt (and the tilt it would teach draws x-ray people too big). */
-        if (k->posture == SEEKER_POSTURE_CROUCH || k->posture == SEEKER_POSTURE_DOWN ||
-            k->node_box[3] < WV_TILT_BOX_MIN * it->p.box_h || k->node_box[3] > WV_TILT_BOX_MAX * it->p.box_h)
-            continue;
         float v_obs = 0.5f * (top + bot), v_pred = it->p.box_y + 0.5f * it->p.box_h;
         float d = (atanf((v_obs - H * 0.5f) / f) - atanf((v_pred - H * 0.5f) / f)) * 57.29578f;
         if (fabsf(d) > 25.0f)
@@ -625,50 +561,22 @@ static void learn_tilt(wv_view *v, const wv_camera *cam, const seeker_tracks *t,
     }
 }
 
-/* The box of a person in the wearer's picture. A person the wearer's phone sees is drawn in that
- * phone's own detection box: it is measured in this very picture, where the fused room position
- * projected back into it carries every range and pose error (most of all just after someone
- * steps out from behind a wall, when the track still sits where the other phone ranged it). A
- * person held as seen through WV_SEEN_HOLD_MS (the wearer's phone missed them this frame) stays
- * in the last such box. Anyone else is drawn where their room position projects. Returns 1 for a
- * box the wearer's phone measured (this frame's, or the held one). */
-static int item_box(const rc *r, const wv_item *it, const seeker_track *k, int *x, int *y, int *w,
-                    int *h)
+static void item_box(const rc *r, const wv_item *it, const seeker_track *k, int *x, int *y, int *w,
+                     int *h)
 {
     const wv_camera *cc = &r->cam;
-    /* The last own box stays through the frames the wearer's phone missed them (the SEEN hold) or
-     * another phone led the track: the projected box is a standing person from the floor to the
-     * top of the head, far bigger than the own box of someone close (legs below the frame) and
-     * tall and narrow on someone crouched. */
-    wv_colour_slot *s = it->direct && it->slot >= 0 && r->view ? &r->view->colours[it->slot] : NULL;
-    const float *nb = NULL;
-    if (!it->direct && it->slot >= 0 && r->view)
-        r->view->colours[it->slot].own_ms = 0; /* no longer drawn as seen: the old box is stale */
     if (it->direct && k->has_node_box && !strcmp(k->node_id, r->w->node) && cc->image_w > 0 &&
         cc->image_h > 0 && k->node_box[2] > 0 && k->node_box[3] > 0 &&
         k->node_box[0] + k->node_box[2] <= cc->image_w * 1.05f &&
         k->node_box[1] + k->node_box[3] <= cc->image_h * 1.05f) {
-        nb = k->node_box;
-        if (s) {
-            s->own_ms = r->now;
-            memcpy(s->own_box, nb, sizeof s->own_box);
-        }
-    } else if (s && s->own_ms && r->now >= s->own_ms && r->now - s->own_ms <= WV_SEEN_BOX_HOLD_MS) {
-        nb = s->own_box;
-    }
-    int own = nb != NULL;
-    if (nb) {
         float sx = (float)r->vp.w / (float)cc->image_w, sy = (float)r->vp.h / (float)cc->image_h;
-        *x = r->vp.x + (int)lroundf(nb[0] * sx);
-        *y = r->vp.y + (int)lroundf(nb[1] * sy);
-        *w = (int)lroundf(nb[2] * sx);
-        *h = (int)lroundf(nb[3] * sy);
+        *x = r->vp.x + (int)lroundf(k->node_box[0] * sx);
+        *y = r->vp.y + (int)lroundf(k->node_box[1] * sy);
+        *w = (int)lroundf(k->node_box[2] * sx);
+        *h = (int)lroundf(k->node_box[3] * sy);
     } else if (it->has_proj) {
-        /* the projected box is a standing person's, floor to head; a seen person who is
-         * crouched gets the same width and WV_CROUCH_BOX_H of the height, from the floor */
-        float top = it->direct && k->posture == SEEKER_POSTURE_CROUCH ? 1.0f - WV_CROUCH_BOX_H : 0.0f;
         *x = to_sx(r, it->p.box_x);
-        *y = to_sy(r, it->p.box_y + top * it->p.box_h);
+        *y = to_sy(r, it->p.box_y);
         *w = to_sx(r, it->p.box_x + it->p.box_w) - *x;
         *h = to_sy(r, it->p.box_y + it->p.box_h) - *y;
     } else {
@@ -694,7 +602,6 @@ static int item_box(const rc *r, const wv_item *it, const seeker_track *k, int *
     *y = clampi(*y, r->vp.y - 4, r->vp.y + r->vp.h + 4);
     *w = x1 - *x;
     *h = y1 - *y;
-    return own;
 }
 
 static int overlaps(const int *a, int x, int y, int w, int h)
@@ -815,32 +722,22 @@ static int draw_skeleton(rc *r, const wv_item *it, const seeker_track *k, uint32
     }
     if (nb == 0)
         return 0;
-    r->skel_y0 = 1000000, r->skel_y1 = -1000000;
     for (int j = 0; j < SEEKER_N_JOINTS; j++)
-        if (ok[j]) {
+        if (ok[j])
             draw_diamond(r->c, sx[j], sy[j], 2 + r->ts, 1, col);
-            r->skel_y0 = sy[j] < r->skel_y0 ? sy[j] : r->skel_y0;
-            r->skel_y1 = sy[j] > r->skel_y1 ? sy[j] : r->skel_y1;
-        }
     return nb;
 }
 
 /* WV_BOX_EASE: the drawn box glides toward this frame's box; a big jump (another detection, a
- * track that moved far) snaps so it never slides across the screen. So does the first box the
- * wearer's phone measured itself (own, item_box) after a projected one: easing there from where
- * the x-ray ghost stood drew the seen frame beside the person for the first frames. */
-static void ease_box(rc *r, const wv_item *it, int own, int *x, int *y, int *w, int *h)
+ * track that moved far) snaps so it never slides across the screen. */
+static void ease_box(rc *r, const wv_item *it, int *x, int *y, int *w, int *h)
 {
-    if (it->slot < 0 || !r->view)
+    if (it->slot < 0 || !r->view || r->view->box_ease_off)
         return;
     wv_colour_slot *s = &r->view->colours[it->slot];
-    int first_own = own && !s->box_own && r->w->handoff;
-    s->box_own = own;
-    if (r->view->box_ease_off)
-        return;
     float jump = hypotf((float)*x + *w * 0.5f - (s->bx + s->bw * 0.5f),
                         (float)*y + *h * 0.5f - (s->by + s->bh * 0.5f));
-    if (!s->box_valid || first_own || jump > WV_BOX_SNAP * (float)(*h > 1 ? *h : 1)) {
+    if (!s->box_valid || jump > WV_BOX_SNAP * (float)(*h > 1 ? *h : 1)) {
         s->bx = (float)*x, s->by = (float)*y, s->bw = (float)*w, s->bh = (float)*h;
         s->box_valid = 1;
     } else {
@@ -856,18 +753,16 @@ static void ease_box(rc *r, const wv_item *it, int own, int *x, int *y, int *w, 
 static void draw_in_view(rc *r, const wv_item *it, const seeker_track *k)
 {
     int x, y, w, h;
-    int own = item_box(r, it, k, &x, &y, &w, &h);
-    ease_box(r, it, own, &x, &y, &w, &h);
+    item_box(r, it, k, &x, &y, &w, &h);
+    ease_box(r, it, &x, &y, &w, &h);
     char rs[16], via[40];
     range_str(rs, sizeof rs, it);
     int cx = x + w / 2, gap = 6 + 2 * r->ts;
     int tag_h = 7 * r->ts, rng_h = 7 * (r->ts + 1);
     uint32_t col = it->direct ? direct_colour(r, it, k) : xray_colour(r, k);
-    int *d = NULL;
     if (r->n_drawn < SEEKER_MAX_TRACKS) {
-        d = &r->drawn[r->n_drawn++][0];
+        int *d = &r->drawn[r->n_drawn++][0];
         d[0] = k->id, d[1] = it->direct, d[2] = x, d[3] = y, d[4] = w, d[5] = h, d[6] = it->level;
-        d[7] = d[8] = 0;
     }
     if (it->direct) {
         draw_rect(r->c, x, y, w, h, r->lw + 1, col);
@@ -879,8 +774,6 @@ static void draw_in_view(rc *r, const wv_item *it, const seeker_track *k)
         if (draw_skeleton(r, it, k, col) > 0) {
             dashed_rect(r->c, x, y, w, h, 1, 14, col); /* faint hull around the ghost */
             r->n_skel++;
-            if (d)
-                d[7] = r->skel_y0, d[8] = r->skel_y1;
         } else {
             dashed_rect(r->c, x, y, w, h, r->lw + 1, 10, col);
             draw_diamond(r->c, cx, y + h / 2, 6 + 3 * r->ts, r->lw, col);
@@ -1210,8 +1103,8 @@ static void p_tag(rc *r, int bx, int by, int bw, float lead_dy, float dx, float 
 static void p_box(rc *r, const wv_item *it, const seeker_track *k, int b[4], int raw[4])
 {
     int x, y, w, h;
-    int own = item_box(r, it, k, &x, &y, &w, &h);
-    ease_box(r, it, own, &x, &y, &w, &h);
+    item_box(r, it, k, &x, &y, &w, &h);
+    ease_box(r, it, &x, &y, &w, &h);
     raw[0] = x, raw[1] = y, raw[2] = w, raw[3] = h;
     int bottom = r->c->h - P(r, 8);
     if (y + h > bottom)
@@ -1345,15 +1238,6 @@ static void p_marks(rc *r, const wv_item *it, const seeker_track *k, int b[4])
                     plan_halo_dash(r->c, r->u, sx[ja], sy[ja], sx[jb], sy[jb], 3 * r->u, 11 * r->u, 7 * r->u, a);
                 nb++;
             }
-        }
-        if (nb > 0 && pass) {
-            r->skel_y0 = 1000000, r->skel_y1 = -1000000;
-            for (int j = 0; j < SEEKER_N_JOINTS; j++)
-                if (ok[j]) {
-                    int row = (int)lroundf(sy[j]);
-                    r->skel_y0 = row < r->skel_y0 ? row : r->skel_y0;
-                    r->skel_y1 = row > r->skel_y1 ? row : r->skel_y1;
-                }
         }
         if (nb > 0) {
             float hr = tall * 0.055f, hy = sy[0] - tall * 0.015f, hw = 3 * r->u + (pass ? 0 : P_HALO_W * r->u);
@@ -1554,12 +1438,10 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 continue;
             int raw[4];
             p_box(r, it, k, box[i], raw);
-            int *d = NULL;
             if (r->n_drawn < SEEKER_MAX_TRACKS) {
-                d = &r->drawn[r->n_drawn++][0];
+                int *d = &r->drawn[r->n_drawn++][0];
                 d[0] = k->id, d[1] = it->direct, d[2] = raw[0], d[3] = raw[1], d[4] = raw[2], d[5] = raw[3],
                 d[6] = it->level;
-                d[7] = d[8] = 0;
             }
             r->n_posture[k->posture >= 0 && k->posture <= SEEKER_POSTURE_DOWN ? k->posture : 0]++;
             /* Marks: people behind walls first, then seen people over them. A change of look
@@ -1595,10 +1477,7 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
                 r->n_fading++;
             }
             draw_set_dash_phase(r->pfx.march);
-            int skel_was = r->n_skel;
             p_marks(r, it, k, box[i]);
-            if (d && r->n_skel > skel_was)
-                d[7] = r->skel_y0, d[8] = r->skel_y1;
             if (!it->direct && it->slot >= 0 && r->view) {
                 wv_colour_slot *gs = &r->view->colours[it->slot];
                 gs->ghost_valid = 1;
@@ -1721,8 +1600,6 @@ static void wv_plan(rc *r, wv_view *v, const seeker_tracks *t, const wv_item *it
         s->drawn[i].w = r->drawn[i][4];
         s->drawn[i].h = r->drawn[i][5];
         s->drawn[i].level = r->drawn[i][6];
-        s->drawn[i].skel_y0 = r->drawn[i][7];
-        s->drawn[i].skel_y1 = r->drawn[i][8];
     }
 }
 
@@ -1812,7 +1689,6 @@ void wv_render(canvas *c, const seeker_config *cfg, wv_view *v, const seeker_tra
     if (w->pitch_auto && use_video)
         learn_tilt(v, &r.cam, t, items, n);
     int64_t now = v->clock_ms ? v->clock_ms : seeker_now_ms(); /* the frame's one timestamp */
-    r.now = now;
     assign_levels(v, cfg, t, items, n, now);
     if (r.plan) {
         anim_person_begin(now, r.u);
@@ -1933,7 +1809,5 @@ void wv_render(canvas *c, const seeker_config *cfg, wv_view *v, const seeker_tra
         s->drawn[i].w = r.drawn[i][4];
         s->drawn[i].h = r.drawn[i][5];
         s->drawn[i].level = r.drawn[i][6];
-        s->drawn[i].skel_y0 = r.drawn[i][7];
-        s->drawn[i].skel_y1 = r.drawn[i][8];
     }
 }
