@@ -706,6 +706,8 @@ the occlusion guard):
   ray meanwhile) glides in over 350 ms like a change of phone.
 - A person only ever seen in part by R2 is still placed at the part's range (nothing better is
   known).
+- The kept distance is trusted for 4 s (`SEEKER_PART_KEEP_MS`) after the last whole-body range;
+  past that the part's own range is used again.
 - The held seen frame stays in R1's last box (above), so nothing cyan moves behind the wall.
 
 Host replay (ctest `handoff`, scene "walk-in, R2 part first"; before = `--no-part-keep`):

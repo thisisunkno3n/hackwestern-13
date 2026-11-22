@@ -659,8 +659,9 @@ static void apply_crouch_range(seeker_fusion_node *n, int64_t now_ms)
     for (int i = 0; i < n->last.n; i++) {
         seeker_contact *c = &n->last.c[i];
         char why[160] = "";
-        if (n->part[i])
-            continue; /* cut by an edge, or where a part just was: the legs are the pose model's guess */
+        if (n->part[i] & (3 | SEEKER_PART_CUT))
+            continue; /* a part, or cut by an edge: the legs are the pose model's guess. A whole
+                       * sighting near where a part just was (bit 4 alone) is still corrected. */
         float k = crouch_range_k(c, n->image_w, n->image_h, why, sizeof why);
         if (k == 1.0f)
             continue;
@@ -753,10 +754,10 @@ int seeker_fusion_ingest(seeker_fusion *f, const seeker_remote_contacts *m, int6
     }
     if (m->hfov_deg > 0)
         n->hfov_deg = m->hfov_deg;
-    mark_partial(f, n, now_ms);
+    apply_hfov(f, n, m);
+    mark_partial(f, n, now_ms); /* after apply_hfov: its bearing window is in real degrees */
     if (f->crouch_range)
         apply_crouch_range(n, now_ms);
-    apply_hfov(f, n, m);
     return (int)(n - f->nodes);
 }
 
@@ -1407,6 +1408,10 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
     for (int i = 0; i < SEEKER_FUSION_MEM; i++) {
         seeker_fusion_mem *m = &f->mem[i];
         m->matched = 0;
+        /* part_keep: a whole-body distance stands in for a part's only this long; after it the
+         * person may have walked on along the ray, and the part's own range is all there is */
+        if (m->ranged_whole && now_ms - m->whole_ms > SEEKER_PART_KEEP_MS)
+            m->ranged_whole = 0;
         if (m->id && m->has_pos && now_ms - m->seen_ms <= cfg->drop_ms) {
             predict(f, m, now_ms, &pri[nlive].x_m, &pri[nlive].y_m);
             live[nlive++] = i;
@@ -1532,8 +1537,10 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
         if (f->handoff && has_room) {
             fix_cov(f, &cls[a].fix, single, bfix[a], &mm->cxx, &mm->cxy, &mm->cyy);
             mm->node_mask = cmask[a];
-            if (!wpart[a])
+            if (!wpart[a]) {
                 mm->ranged_whole = 1;
+                mm->whole_ms = now_ms;
+            }
             mm->part_fix = bfix[a] && wpart[a] == 2;
         }
         mm->has_pos = has_room;
@@ -1594,9 +1601,16 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
              * Without a skeleton this tick, the held one. */
             float pp[SEEKER_N_JOINTS][3];
             int pv = have || k->has_pts;
-            if (have) {
+            if (have && mm->post_node == (const void *)pn && mm->post_msgs == (long)pn->msgs) {
+                /* the same message again: raw is rescaled by the predicted distance every tick,
+                 * which would read as a new skeleton and vote again */
+                memcpy(pp, mm->post_pts, sizeof pp);
+            } else if (have) {
                 memcpy(pp, raw, sizeof pp);
                 seeker_posture_mask_offframe(pp, (const float (*)[3])sc->pts);
+                memcpy(mm->post_pts, pp, sizeof pp);
+                mm->post_node = pn;
+                mm->post_msgs = (long)pn->msgs;
             } else if (k->has_pts) {
                 memcpy(pp, k->pts, sizeof pp);
             }

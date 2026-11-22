@@ -315,8 +315,9 @@ static int same_on_ray(const seeker_tracks *t, const wv_config *w, const wv_pose
     if (e1 < WV_DUP_RANGE_LO || e1 > hi1 || e2 < WV_DUP_RANGE_LO || e2 > hi2 ||
         (e1 > WV_DUP_RANGE_OK && e2 > WV_DUP_RANGE_OK))
         return 0;
-    return !(o->behind_wall && !d->behind_wall &&
-             behind_any_wall(w, pose, pose->x_m + s1 * u1x, pose->y_m + s1 * u1y));
+    /* Someone behind a wall is never taken for a copy of a person in the open: hiding a real
+     * second person is worse than drawing one twice. */
+    return !(o->behind_wall && !d->behind_wall);
 }
 
 int wv_classify(const seeker_tracks *t, const wv_config *w, const wv_pose *pose, wv_item *items,
@@ -641,6 +642,8 @@ static int item_box(const rc *r, const wv_item *it, const seeker_track *k, int *
      * tall and narrow on someone crouched. */
     wv_colour_slot *s = it->direct && it->slot >= 0 && r->view ? &r->view->colours[it->slot] : NULL;
     const float *nb = NULL;
+    if (!it->direct && it->slot >= 0 && r->view)
+        r->view->colours[it->slot].own_ms = 0; /* no longer drawn as seen: the old box is stale */
     if (it->direct && k->has_node_box && !strcmp(k->node_id, r->w->node) && cc->image_w > 0 &&
         cc->image_h > 0 && k->node_box[2] > 0 && k->node_box[3] > 0 &&
         k->node_box[0] + k->node_box[2] <= cc->image_w * 1.05f &&
@@ -650,7 +653,7 @@ static int item_box(const rc *r, const wv_item *it, const seeker_track *k, int *
             s->own_ms = r->now;
             memcpy(s->own_box, nb, sizeof s->own_box);
         }
-    } else if (s && s->own_ms && r->now - s->own_ms <= WV_SEEN_BOX_HOLD_MS) {
+    } else if (s && s->own_ms && r->now >= s->own_ms && r->now - s->own_ms <= WV_SEEN_BOX_HOLD_MS) {
         nb = s->own_box;
     }
     int own = nb != NULL;

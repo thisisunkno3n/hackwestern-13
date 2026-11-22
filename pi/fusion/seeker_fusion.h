@@ -219,7 +219,11 @@ typedef struct {
     float ho_x, ho_y;   /* handoff blend: offset from the new fix, decaying from ho_ms */
     int64_t ho_ms;
     long handoffs;      /* node set changes this track lived through (logs, tests) */
-    int ranged_whole;   /* placed at least once from more than a lone partial sighting */
+    int ranged_whole;   /* placed at least once from more than a lone partial sighting, */
+    int64_t whole_ms;   /* last at whole_ms: part_keep trusts that distance SEEKER_PART_KEEP_MS */
+    const void *post_node; /* posture: the node and message count the last vote's joints came */
+    long post_msgs;        /* from, so one phone message votes once however often it is rescaled */
+    float post_pts[SEEKER_N_JOINTS][3];
     int part_fix;       /* the last fix was another phone's lone partial sighting, by bearing */
 } seeker_fusion_mem;
 
@@ -268,6 +272,7 @@ typedef struct {
  *     twice the size until the phone saw the whole person. A track that was never ranged whole
  *     keeps the part's range, as before (there is nothing better). */
 #define SEEKER_OCCL_HOLD_MS 1000
+#define SEEKER_PART_KEEP_MS 4000 /* part_keep: how long a whole-body distance stands in for a part's */
 /* Someone standing close to a phone has their legs below its frame, and the pose model's hip
  * visibility dips under 0.5 now and then: a partial contact by the rule above, though
  * nothing hides them. Such a contact (head and both shoulders seen, both ankles placed at
