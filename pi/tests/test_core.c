@@ -3486,14 +3486,15 @@ static int count_near_rgb(const canvas *c, uint32_t col, int tol, int x0, int x1
 }
 
 /* Pixels with the hidden-line hue (pale yellow over a dark frame), at any anti-aliased strength. */
-static int count_warm(const canvas *c, int x0, int x1, int y0, int y1)
+/* Pixels in the plan theme's behind-a-wall green (P_HIDDEN, also blended over video). */
+static int count_hidden(const canvas *c, int x0, int x1, int y0, int y1)
 {
     int n = 0;
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) {
             uint32_t p = c->px[y * c->stride + x];
             int r = (int)((p >> 16) & 255), g = (int)((p >> 8) & 255), b = (int)(p & 255);
-            n += r >= 80 && r > b + 30 && g > b + 15;
+            n += g >= 80 && g > r + 40 && g > b + 15;
         }
     return n;
 }
@@ -3532,36 +3533,36 @@ static void test_plan_render(void)
     /* No pts: the hull and a dashed cross, still hidden colour, no skeleton counted. */
     k->has_pts = 0;
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    CHECK(v.last.n_skel == 0 && v.last.n_xray == 1 && count_warm(&c, W / 2 - 30, W / 2 + 30, 0, H) > 10);
+    CHECK(v.last.n_skel == 0 && v.last.n_xray == 1 && count_hidden(&c, W / 2 - 30, W / 2 + 30, 0, H) > 10);
     /* Seen and close (1 m): red; far (6 m): no red at all. */
     snprintf(k->nodes, sizeof k->nodes, "W+R2");
     k->room_y_m = 1.0f;
     v.clock_ms = 1000;
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    int red = count_near_rgb(&c, P_RED, 70, 0, W, 0, H);
+    int red = count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H);
     printf("plan close person: %d red px\n", red);
     CHECK(v.last.n_direct == 1 && red > 50);
     memset(v.colours, 0, sizeof v.colours);
     k->room_y_m = 6.0f;
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    CHECK(v.last.n_direct == 1 && count_near_rgb(&c, P_RED, 70, 0, W, 0, H) == 0);
+    CHECK(v.last.n_direct == 1 && count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H) == 0);
     /* Down is red even far away (the rescue case); crouching is not. */
     k->posture = SEEKER_POSTURE_CROUCH;
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    CHECK(v.last.n_posture[SEEKER_POSTURE_CROUCH] == 1 && count_near_rgb(&c, P_RED, 70, 0, W, 0, H) == 0);
+    CHECK(v.last.n_posture[SEEKER_POSTURE_CROUCH] == 1 && count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H) == 0);
     k->posture = SEEKER_POSTURE_DOWN;
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    CHECK(v.last.n_posture[SEEKER_POSTURE_DOWN] == 1 && count_near_rgb(&c, P_RED, 70, 0, W, 0, H) > 30);
+    CHECK(v.last.n_posture[SEEKER_POSTURE_DOWN] == 1 && count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H) > 30);
     /* Down behind a wall: the plate goes red, the ghost stays in the hidden colour. */
     snprintf(k->nodes, sizeof k->nodes, "R2");
     k->room_y_m = 3.0f;
     k->has_pts = 1;
     memset(v.colours, 0, sizeof v.colours); /* another scene: not the seen person held */
     wv_render(&c, &cfg, &v, &t, 0, NULL);
-    printf("plan down behind wall: %d red px, %d hidden-line px\n", count_near_rgb(&c, P_RED, 70, 0, W, 0, H),
-           count_warm(&c, 0, W, 0, H));
-    CHECK(v.last.n_xray == 1 && v.last.n_skel == 1 && count_near_rgb(&c, P_RED, 70, 0, W, 0, H) > 30 &&
-          count_warm(&c, 0, W, 0, H) > 60);
+    printf("plan down behind wall: %d red px, %d hidden-line px\n", count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H),
+           count_hidden(&c, 0, W, 0, H));
+    CHECK(v.last.n_xray == 1 && v.last.n_skel == 1 && count_near_rgb(&c, P_ALERT, 70, 0, W, 0, H) > 30 &&
+          count_hidden(&c, 0, W, 0, H) > 60);
     k->posture = SEEKER_POSTURE_UNKNOWN;
     /* The title block grows a Delay cell for the latency readout. */
     CHECK(plan_title_block(NULL, 1.0f, "R1 live", 0, &t, "W", "Fixed", "140 ms") >
@@ -3592,7 +3593,7 @@ static void test_plan_render(void)
     int m24 = (int)lroundf(24 * u), h = H - 2 * m24 - plan_title_h(u) - (int)lroundf(16 * u);
     float ppm = ((float)h * 0.72f - 40 * u) / 6.0f, ay = (float)m24 + (float)(int)lroundf((float)h * 0.72f);
     int px0 = W / 2 - 1, py0 = (int)lroundf(ay - 3.0f * ppm);
-    CHECK(count_rgb(&c, P_INK, px0 - 3, px0 + 3, py0 - 3, py0 + 3) > 4);
+    CHECK(count_rgb(&c, P_SEEN, px0 - 3, px0 + 3, py0 - 3, py0 + 3) > 4);
     draw_set_theme(DRAW_THEME_CLASSIC);
     free(c.px);
 }

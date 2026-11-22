@@ -491,10 +491,10 @@ static void plan_banners(ctx *x, float u, int wv_radar, int eagle_view)
                              frozen     ? "Video lost, last picture shown"
                              : wv_radar ? "Camera paused, showing plan"
                                         : "No camera picture",
-                             plan_video_why(st->video_why), P_INK, P_INK) + gap;
+                             plan_video_why(st->video_why), P_ALERT, P_INK) + gap;
     }
     if (x->stale)
-        y += plan_banner(x->c, u, y, "Fusion lost", "no tracks for over half a second", P_RED, P_RED) + gap;
+        y += plan_banner(x->c, u, y, "Fusion lost", "no tracks for over half a second", P_ALERT, P_ALERT) + gap;
     for (int i = 0; t && i < t->n_nodes; i++) {
         if (strcmp(t->nodes[i].state, "lost") != 0)
             continue;
@@ -502,7 +502,7 @@ static void plan_banners(ctx *x, float u, int wv_radar, int eagle_view)
             continue; /* the wearer view says it itself */
         char s[32];
         snprintf(s, sizeof s, "%s lost", t->nodes[i].node_id);
-        y += plan_banner(x->c, u, y, s, "", P_RED, P_RED) + gap;
+        y += plan_banner(x->c, u, y, s, "", P_ALERT, P_ALERT) + gap;
     }
 }
 

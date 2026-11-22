@@ -15,12 +15,21 @@
 #include "seeker_msgs.h"
 #include "wearer_view.h"
 
-#define P_INK RGB(244, 242, 236)
+/* Palette: the one place the plan theme's colours live. People and alerts use cool hues only
+ * (warm colours vanish against flames and orange glow): cyan for a seen person, green for someone
+ * behind a wall, magenta for every alert. Every person stroke gets a dark halo under it (P_HALO_A
+ * black, P_HALO_W px wider) so it reads on bright fire and dark smoke alike. */
+#define P_INK RGB(244, 242, 236) /* plate text and the drawing's own lines (walls, scale, you) */
 #define P_INK2_A 158 /* secondary text: ink at 62% */
 #define P_PLATE RGB(12, 13, 14)
 #define P_PLATE_A 214 /* plate fill at 84% */
-#define P_HIDDEN RGB(255, 227, 163)
-#define P_RED RGB(255, 90, 78)
+#define P_SEEN RGB(34, 228, 255)   /* #22E4FF seen person: frame, ticks, leader, plate edge */
+#define P_HIDDEN RGB(59, 255, 158) /* #3BFF9E behind a wall: skeleton, hull, plate edge, title */
+#define P_ALERT RGB(255, 61, 208)  /* #FF3DD0 close, coming closer, down, video late, warnings */
+#define P_RED P_ALERT              /* older name for the alert colour */
+#define P_HALO RGB(0, 0, 0)
+#define P_HALO_A 166   /* 65% */
+#define P_HALO_W 3.0f  /* px (at 720) wider than the stroke it sits under */
 #define P_GROUND RGB(17, 18, 20) /* behind the full-screen plan */
 
 float plan_u(const canvas *c);
@@ -33,6 +42,25 @@ typedef struct {
     uint32_t col;
     int alpha;
 } plan_line;
+
+/* Person strokes with their halo: the halo alone (so a figure can lay every halo before any
+ * colour), or halo then colour. Same arguments as draw_line_aa / draw_dashed_aa, plus u; the halo's
+ * alpha follows the stroke's. */
+void plan_halo_line(canvas *c, float u, float x0, float y0, float x1, float y1, float width, int cap,
+                    int alpha);
+void plan_halo_dash(canvas *c, float u, float x0, float y0, float x1, float y1, float width,
+                    float dash, float gap, int alpha);
+void plan_stroke(canvas *c, float u, float x0, float y0, float x1, float y1, float width, int cap,
+                 uint32_t col, int alpha);
+void plan_dash(canvas *c, float u, float x0, float y0, float x1, float y1, float width, float dash,
+               float gap, uint32_t col, int alpha); /* butt caps */
+void plan_dash_rect(canvas *c, float u, float x, float y, float w, float h, float width, float dash,
+                    float gap, uint32_t col, int alpha);
+/* Solid square of side s centred on (cx, cy) on a halo square P_HALO_W wider. */
+void plan_square(canvas *c, float u, float cx, float cy, float s, uint32_t col, int alpha);
+/* Halo under a draw_cut_rect outline of edge width `ew`. */
+void plan_halo_rect(canvas *c, float u, float x, float y, float w, float h, float cut, float ew,
+                    int alpha);
 
 /* Plate size for these lines (padding 12 x 9, 3 px between lines, 10 px for the cut). */
 void plan_plate_size(float u, const plan_line *l, int n, int *w, int *h);
