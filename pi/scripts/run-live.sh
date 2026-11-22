@@ -51,7 +51,9 @@
 #               looking straight at it (-0.463,0.06,90: Felix's living room, the side face of
 #               the wall corner to the left of tag 0; docs/LIVE-RUN.md "R2 on tag 7" derives it)
 #   PINS        hud_fusion pose pins, space separated (pin mode "R2=$R2_POSE", tag modes none;
-#               setting PINS replaces R2_POSE). Do not pin the wearer.
+#               setting PINS replaces R2_POSE). Do not pin the wearer. The seeker bridge gets
+#               them too (--pin), so a pinned phone's messages carry the pin even when its page
+#               reconnects with pose null.
 #   WALLS       room wall segments "x1,y1,x2,y2 ..." (or "none" to clear config walls)
 #   PORT        phone port (8080)        PHONE_HOST  host in the phone links (qnxpi-felix.local)
 #   TAG_MM      printed tag's black square side in mm (186)   TAG_ID  tag id at the origin (0)
@@ -340,6 +342,9 @@ fi
 set -- "$@" --port "$PORT" --tls-cert "$CERT" --tls-key "$KEY" --view-node "$WEARER"
 [ "$BRIDGE" = seeker ] && set -- "$@" --video-fps "${VFPS%.*}"
 [ "$BRIDGE" = seeker ] && [ "$DRAIN" = 0 ] && set -- "$@" --no-drain
+if [ "$BRIDGE" = seeker ]; then
+  for p in $PINS; do set -- "$@" --pin "$p"; done
+fi
 for a in $BRIDGE_ARGS; do set -- "$@" "$a"; done
 launch bridge "$@"
 
