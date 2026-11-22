@@ -1061,10 +1061,8 @@ static void handoff_gate(const seeker_fusion *f, const seeker_fusion_mem *m, con
 }
 
 /* The wearer's partial sighting continuing track m: on its bearing, at the track's distance. */
-static void bearing_fix(const seeker_fusion *f, const seeker_tri_prior *pr, const seeker_fusion_mem *m,
-                        const seeker_ray *ry, seeker_fix *fx)
+static void bearing_fix(const seeker_fusion *f, const seeker_tri_prior *pr, const seeker_ray *ry, seeker_fix *fx)
 {
-    (void)m;
     float b = ry->bearing_deg * DEG2RAD, ux = sinf(b), uy = cosf(b);
     float along = (pr->x_m - ry->x_m) * ux + (pr->y_m - ry->y_m) * uy;
     fx->method = SEEKER_TRI_PARALLEL; /* a position, filtered like a fused one */
@@ -1258,8 +1256,7 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
                 cl_mem[row_col[r]] = live[r];
                 f->mem[live[r]].matched = 1;
                 if (wpart[row_col[r]]) /* on the wearer's bearing, at the track's distance */
-                    bearing_fix(f, &pri[r], &f->mem[live[r]], &rays[cls[row_col[r]].member[0]],
-                                &cls[row_col[r]].fix);
+                    bearing_fix(f, &pri[r], &rays[cls[row_col[r]].member[0]], &cls[row_col[r]].fix);
             }
     for (int a = 0; a < nout; a++)
         if (cl_mem[a] >= 0)
