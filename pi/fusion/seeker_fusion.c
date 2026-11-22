@@ -43,6 +43,7 @@ void seeker_fusion_init(seeker_fusion *f, const seeker_config *cfg)
     f->pose_flip = 1;
     f->range_hfov = 1;
     f->handoff = 1;
+    f->crouch_range = 1;
     seeker_tri_defaults(&f->tri);
     f->tri.assoc_m = cfg->assoc_m;
     f->tri.bearing_sigma_deg = cfg->tri_bearing_sigma_deg;
@@ -594,6 +595,52 @@ static void step_pose(seeker_fusion *f, seeker_fusion_node *n, int64_t now)
     }
 }
 
+/* SEEKER_CROUCH_EYE_ANKLE_FRAC: the factor for contact c's range (1 unless phone.html ranged it
+ * from eye to ankle and its landmarks are crouched); why gets the posture features. */
+static float crouch_range_k(const seeker_contact *c, int w, int h, char *why, int whysz)
+{
+    if (!c->has_pts || !c->has_range || w <= 0 || h <= 0)
+        return 1.0f;
+    const float(*p)[3] = c->pts;
+    const float v = 0.5f; /* phone.html VIS_MIN */
+    int top = p[0][2] > v || p[1][2] > v || p[2][2] > v;
+    int ankle = p[15][2] > v || p[16][2] > v;
+    if (!top || !ankle)
+        return 1.0f; /* ranged from the torso or the box */
+    float px[SEEKER_N_JOINTS][3];
+    for (int j = 0; j < SEEKER_N_JOINTS; j++) {
+        px[j][0] = p[j][0] * (float)w;
+        px[j][1] = p[j][1] * (float)h;
+        px[j][2] = p[j][2];
+    }
+    seeker_posture_mask_offframe(px, p);
+    seeker_posture_feat ft;
+    if (!seeker_posture_features((const float(*)[3])px, &ft) ||
+        seeker_posture_classify(&ft, SEEKER_POSTURE_UNKNOWN) != SEEKER_POSTURE_CROUCH)
+        return 1.0f;
+    seeker_posture_describe(&ft, why, whysz);
+    return SEEKER_CROUCH_EYE_ANKLE_FRAC / SEEKER_STAND_EYE_ANKLE_FRAC;
+}
+
+static void apply_crouch_range(seeker_fusion_node *n, int64_t now_ms)
+{
+    for (int i = 0; i < n->last.n; i++) {
+        seeker_contact *c = &n->last.c[i];
+        char why[160] = "";
+        float k = crouch_range_k(c, n->image_w, n->image_h, why, sizeof why);
+        if (k == 1.0f)
+            continue;
+        if (!n->crouch_ranges || now_ms - n->crouch_log_ms >= 5000) {
+            n->crouch_log_ms = now_ms;
+            seeker_log("NODE %s crouch range %s: eye-to-ankle range %.2f m taken as crouched, "
+                       "%.2f m (x%.2f; %s; %ld so far)", n->id, c->id, c->range_m, c->range_m * k,
+                       k, why, n->crouch_ranges + 1);
+        }
+        c->range_m *= k;
+        n->crouch_ranges++;
+    }
+}
+
 int seeker_fusion_ingest(seeker_fusion *f, const seeker_remote_contacts *m, int64_t now_ms)
 {
     seeker_fusion_node *n = find_node(f, m->node_id, 1);
@@ -628,6 +675,8 @@ int seeker_fusion_ingest(seeker_fusion *f, const seeker_remote_contacts *m, int6
     }
     if (m->hfov_deg > 0)
         n->hfov_deg = m->hfov_deg;
+    if (f->crouch_range)
+        apply_crouch_range(n, now_ms);
     apply_hfov(f, n, m);
     return (int)(n - f->nodes);
 }

@@ -5,6 +5,7 @@
  *   hud_fusion [--config config/seeker.json] [--debug] [--run-for <s>] [--no-health]
  *              [--no-smooth] [--smooth-alpha a] [--smooth-beta b] [--smooth-gate m]
  *              [--no-range-smooth] [--no-pose-gate] [--no-pose-smooth] [--no-pose-flip] [--no-handoff]
+ *              [--no-crouch-range]
  *              [--pose ID=x_m,y_m,yaw_deg]... [--init-pose ID=x_m,y_m,yaw_deg]... [--poses FILE] [--pose-source message|config]
  *              [--tag-pose TAG=x_m,y_m,yaw_deg]... [--tag-frame ID=tag_x_m,tag_y_m,tag_yaw_deg]...
  *
@@ -34,6 +35,8 @@
  * --no-handoff turns off the phone-to-phone handoff (seeker_fusion.h SEEKER_HANDOFF_*: partial
  * contacts by bearing, covariance track gate, glide on a node set change, learned range ratios)
  * and runs the old track identity code.
+ * --no-crouch-range takes a crouched person's eye-to-ankle range as the phone sent it, instead
+ * of with the crouch height (seeker_fusion.h SEEKER_CROUCH_EYE_ANKLE_FRAC).
  * --no-pose-smooth takes every live message pose as is (no One Euro, SEEKER_POSE_*_CUTOFF).
  * --no-pose-gate turns off the jump gate on live message poses (seeker_fusion.h): every full
  * message pose is then taken at once, one-frame tag flips included.
@@ -109,7 +112,7 @@ static void usage(const char *argv0)
             "usage: %s [--config f] [--debug] [--run-for s] [--no-health]\n"
             "          [--no-smooth] [--smooth-alpha 0..1] [--smooth-beta 0..1] [--smooth-gate m]\n"
             "          [--no-range-smooth] [--no-pose-gate] [--no-pose-smooth] [--no-pose-flip] [--no-handoff]\n"
-            "          [--no-skel-smooth] [--person-h m] [--range-scale ID=k] [--no-range-hfov]\n"
+            "          [--no-crouch-range] [--no-skel-smooth] [--person-h m] [--range-scale ID=k] [--no-range-hfov]\n"
             "          [--cam-h ID=m] [--cam-pitch ID=deg] [--ground-range]\n"
             "          [--wearer-node ID] [--predict-ms N] [--hfov ID=deg|preset]...\n"
             "          [--pose ID=x_m,y_m,yaw_deg]... [--init-pose ID=x_m,y_m,yaw_deg]... [--poses FILE] [--pose-source message|config]\n"
@@ -139,7 +142,7 @@ int main(int argc, char **argv)
     int debug = 0, use_health = 1;
     double run_for = 0;
     int no_smooth = 0, no_range_smooth = 0, no_pose_gate = 0, no_skel_smooth = 0, predict_ms = -1;
-    int no_pose_smooth = 0, no_pose_flip = 0, no_handoff = 0;
+    int no_pose_smooth = 0, no_pose_flip = 0, no_handoff = 0, no_crouch_range = 0;
     const char *wearer_node = NULL;
     const char *hfov_args[SEEKER_MAX_NODES];
     int n_hfov = 0;
@@ -216,6 +219,8 @@ int main(int argc, char **argv)
             no_pose_flip = 1;
         else if (!strcmp(argv[i], "--no-handoff"))
             no_handoff = 1;
+        else if (!strcmp(argv[i], "--no-crouch-range"))
+            no_crouch_range = 1;
         else if (!strcmp(argv[i], "--no-skel-smooth"))
             no_skel_smooth = 1;
         else if (!strcmp(argv[i], "--wearer-node") && i + 1 < argc)
@@ -286,6 +291,7 @@ int main(int argc, char **argv)
     fus.pose_smooth = !no_pose_smooth;
     fus.pose_flip = !no_pose_flip;
     fus.handoff = !no_handoff;
+    fus.crouch_range = !no_crouch_range;
     fus.skel_smooth = !no_skel_smooth;
     for (int i = 0; i < n_hfov; i++) {
         char id[SEEKER_NODE_LEN];
@@ -487,6 +493,13 @@ int main(int argc, char **argv)
                    SEEKER_HANDOFF_RK_TAU_MS / 1000.0f);
     else
         seeker_log("handoff: off (--no-handoff), old track identity");
+    if (fus.crouch_range)
+        seeker_log("crouch range: a crouched contact's eye-to-ankle range is taken with the crouch "
+                   "height, x%.2f (%.2f over %.2f of standing; --no-crouch-range: as sent)",
+                   SEEKER_CROUCH_EYE_ANKLE_FRAC / SEEKER_STAND_EYE_ANKLE_FRAC,
+                   SEEKER_CROUCH_EYE_ANKLE_FRAC, SEEKER_STAND_EYE_ANKLE_FRAC);
+    else
+        seeker_log("crouch range: off (--no-crouch-range), ranges as the phones sent them");
     if (fus.skel_smooth)
         seeker_log("skeletons (pts): One Euro per joint (min cutoff %.1f Hz, beta %.1f), joints "
                    "under visibility %.2f held %d ms, whole skeleton held %d ms, up to %d per "

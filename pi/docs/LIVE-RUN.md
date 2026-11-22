@@ -724,6 +724,19 @@ phone's frame, with a real shin (MediaPipe invents hidden legs and often folds t
   (`isUpright`), and a deep squat or a side-on sitter is often wider than that, so the person
   blinks out instead of reading CROUCH. Add `&minaspect=1.0` to that phone's link (typed by hand)
   if crouching people vanish.
+- Range when crouched. `phone.html` ranges from eye-to-ankle height over 0.90 of the standing
+  height. Crouched, that height is about 0.48 (full squat) to 0.68 (one knee down) of standing,
+  so the range reads 1.3 to 1.9 times too far. With R2's own error on top it lands past the
+  two-phone fix's limit (2x), and the person split in two: SEEN on R1's bearing plus an x-ray
+  copy far along R2's ray (to the right of the person from R1 at Morrissette). `hud_fusion` now
+  checks each contact's own landmarks: both legs folded (the CROUCH rule above) and an
+  eye-to-ankle range means the range is taken with the crouch height (x0.64, 0.58 over 0.90).
+  A contact ranged from the torso (no eyes or ankles in view) is left as sent. Log, at most every
+  5 s per phone: `NODE R1 crouch range R1-p3: eye-to-ankle range 4.12 m taken as crouched, 2.65 m
+  (x0.64; ...; N so far)`. `FUSION_ARGS=--no-crouch-range` is the old behaviour. Host replay
+  (`test_handoff`, crouch scene, 2.5 s crouched): before, a second track 67 of 82 ticks, an x-ray
+  copy drawn 74 of 82 frames, 2.6 m from the person and 1.3 m to their right; after, one track, 0
+  x-ray frames, CROUCH every tick, at most 0.20 m off.
 - Limits: 2D only. Someone lying along the camera's line of sight (head toward the phone) looks
   short and upright and may read STAND or UNKNOWN.
 

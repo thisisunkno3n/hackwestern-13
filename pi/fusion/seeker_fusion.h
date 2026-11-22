@@ -102,7 +102,20 @@ typedef struct {
                             * the phone; with hfov_preset, landscape and portrait values */
     float hfov_set_portrait;
     int warned_tag;        /* unknown tag id last logged, -1 none */
+    int64_t crouch_log_ms; /* last "crouch range" log line */
+    long crouch_ranges;    /* contacts ranged with the crouch height (logs, tests) */
 } seeker_fusion_node;
+
+/* Crouch height model. phone.html ranges from the eye (or nose) to mid-ankle height over
+ * SEEKER_STAND_EYE_ANKLE_FRAC of the standing height when both show. Crouched (both legs folded,
+ * seeker_posture_classify on the contact's own landmarks) that height is
+ * SEEKER_CROUCH_EYE_ANKLE_FRAC of the standing height (about 0.48 in a full squat to 0.68 with a
+ * knee down), so the range reads 1.3 to 1.9x long: far enough past the other phone's fix that
+ * triangulation splits the person in two. Such a range is scaled by the ratio of the two. A
+ * contact ranged from the torso (no eyes or ankles at visibility 0.5) needs nothing: the torso
+ * does not fold. */
+#define SEEKER_STAND_EYE_ANKLE_FRAC 0.90f /* phone.html EYE_ANKLE_FRAC */
+#define SEEKER_CROUCH_EYE_ANKLE_FRAC 0.58f
 
 #define SEEKER_MAX_TAGS 16
 
@@ -230,6 +243,9 @@ typedef struct {
     int ground_range; /* 1: a node with cam_h also ranges from the feet row (averaged in) */
     int handoff;     /* 1 (init default): partial contacts, covariance gate and the handoff blend
                       * (SEEKER_HANDOFF_*); 0 is the old identity code (hud_fusion --no-handoff) */
+    int crouch_range; /* 1 (init default): eye-to-ankle ranges of a crouched contact use the
+                       * crouch height (SEEKER_CROUCH_*); 0: as the phone sent them
+                       * (hud_fusion --no-crouch-range) */
     int n_tags;    /* room poses of tags other than 0 (hud_fusion --tag-pose) */
     seeker_fusion_tag tags[SEEKER_MAX_TAGS];
     seeker_tri_opts tri; /* triangulation tuning; init copies assoc_m and the fusion.tri_* keys */

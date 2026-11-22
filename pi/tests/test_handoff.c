@@ -19,6 +19,10 @@
  *                   a head, a shoulder and an arm in 70% of its frames (hips guessed by the pose
  *                   model, box-height range about 2x long).
  *   partial alone   R1 sees only such a part and nobody else sees anyone.
+ *   crouch          the person stands at -0.7,0.5 in both phones' view and crouches at 1.5 s
+ *                   (0.4 s down, then stays down). The phones range as phone.html does, from
+ *                   eye-to-ankle / 0.90: crouched that reads 1.75x long, so R2's range is 2.2x
+ *                   the truth. Before is current main's defaults with --no-crouch-range.
  *
  * Metrics: track ids the person had, ticks with two tracks (one person shown twice), frames
  * drawn as seen, look changes (seen <-> x-ray) after R1 first saw them, crossfade frames,
@@ -60,6 +64,15 @@ static const float BODY[SEEKER_N_JOINTS][2] = {
     { 0.22f, 0.00f }, { -0.08f, 0.00f }, { 0.08f, 0.00f }, { -0.08f, 0.25f }, { 0.08f, 0.25f },
     { -0.08f, 0.48f }, { 0.08f, 0.48f },
 };
+/* The same person in a deep crouch facing the camera: torso leaning in, thighs toward the camera
+ * (knees out, about level with the hips), hands on the knees. Eye to ankle 0.53 of the standing
+ * height (standing: 0.93). */
+static const float CROUCH_BODY[SEEKER_N_JOINTS][2] = {
+    { 0.00f, -0.31f }, { -0.02f, -0.33f }, { 0.02f, -0.33f }, { -0.05f, -0.32f }, { 0.05f, -0.32f },
+    { -0.12f, -0.21f }, { 0.12f, -0.21f }, { -0.17f, -0.08f }, { 0.17f, -0.08f }, { -0.14f, 0.03f },
+    { 0.14f, 0.03f }, { -0.08f, 0.00f }, { 0.08f, 0.00f }, { -0.16f, 0.03f }, { 0.16f, 0.03f },
+    { -0.10f, 0.20f }, { 0.10f, 0.20f },
+};
 /* What R1 sees of someone leaning out at the divider's edge: head, right shoulder and arm; the
  * pose model guesses the hips (just over phone.html's 0.6 cut), the rest is hidden. */
 static const float PART_VIS[SEEKER_N_JOINTS] = { 0.9f, 0.9f, 0.9f, 0.2f, 0.8f, 0.2f, 0.9f, 0.1f, 0.9f,
@@ -72,9 +85,27 @@ static const pose3 R1 = { 0.0f, -2.0f, 0.0f }, R2_NEAR = { -1.59f, -1.4f, 49.0f 
                    R2_FAR = { -4.2f, -3.8f, 45.0f };
 static const float WALL[4] = { -0.2f, -0.6f, 1.4f, -0.6f };
 
-enum { STEP_OUT = 0, STEP_OUT_R2_LOST, STEP_OUT_FAR, HAND_OUT, PARTIAL_ALONE, N_SCENES };
+enum { STEP_OUT = 0, STEP_OUT_R2_LOST, STEP_OUT_FAR, HAND_OUT, PARTIAL_ALONE, CROUCH, N_SCENES };
 static const char *const SCENE[] = { "step-out", "step-out, R2 lost", "step-out, far R2", "hand-out",
-                                     "partial alone" };
+                                     "partial alone", "crouch" };
+#define CROUCH_T0 1500 /* the crouch starts, and is down CROUCH_DOWN_MS later */
+#define CROUCH_DOWN_MS 400
+
+/* How far into the crouch the person is at t, 0 standing to 1 down. */
+static float crouch_at(int scene, int64_t t)
+{
+    if (scene != CROUCH)
+        return 0;
+    float s = (float)(t - CROUCH_T0) / (float)CROUCH_DOWN_MS;
+    return s < 0 ? 0 : s > 1 ? 1 : s;
+}
+
+/* phone.html's person height for a body (all joints seen): eye midpoint to ankle midpoint / 0.90. */
+static float phone_height(const float (*b)[2])
+{
+    return hypotf(0.5f * (b[1][0] + b[2][0] - b[15][0] - b[16][0]),
+                  0.5f * (b[1][1] + b[2][1] - b[15][1] - b[16][1])) / 0.90f;
+}
 
 static float orient(float ax, float ay, float bx, float by, float cx, float cy)
 {
@@ -94,6 +125,11 @@ static void truth(int scene, int64_t t, float *x, float *y)
     if (scene == HAND_OUT || scene == PARTIAL_ALONE) {
         *x = -0.05f;
         *y = 0.0f;
+        return;
+    }
+    if (scene == CROUCH) {
+        *x = -0.7f;
+        *y = 0.5f;
         return;
     }
     float s = (float)(t - 1500) / 1500.0f;
@@ -141,10 +177,16 @@ static void make_msg(int scene, const char *node, pose3 p, int64_t t, seeker_rem
     seeker_contact *c = &m->c[m->n++];
     snprintf(c->id, sizeof c->id, "%s-p1", node);
     snprintf(c->cls, sizeof c->cls, "person");
+    float body[SEEKER_N_JOINTS][2], s = crouch_at(scene, t);
+    for (int j = 0; j < SEEKER_N_JOINTS; j++)
+        for (int a = 0; a < 2; a++)
+            body[j][a] = BODY[j][a] + s * (CROUCH_BODY[j][a] - BODY[j][a]);
+    /* the feet stay on the floor: the hips drop as the person goes down */
+    float hip_v = 240.0f + (0.5f * (BODY[15][1] + BODY[16][1]) - 0.5f * (body[15][1] + body[16][1])) * hpx;
     float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
     for (int j = 0; j < SEEKER_N_JOINTS; j++) {
-        c->pts[j][0] = (u + (BODY[j][0] + 0.01f * (float)gauss()) * hpx) / 640.0f;
-        c->pts[j][1] = (240.0f + (BODY[j][1] + 0.01f * (float)gauss()) * hpx) / 480.0f;
+        c->pts[j][0] = (u + (body[j][0] + 0.01f * (float)gauss()) * hpx) / 640.0f;
+        c->pts[j][1] = (hip_v + (body[j][1] + 0.01f * (float)gauss()) * hpx) / 480.0f;
         c->pts[j][2] = how == 2 ? 0.9f : PART_VIS[j];
         if (c->pts[j][2] >= 0.3f) {
             x0 = fminf(x0, c->pts[j][0] * 640.0f), x1 = fmaxf(x1, c->pts[j][0] * 640.0f);
@@ -160,6 +202,8 @@ static void make_msg(int scene, const char *node, pose3 p, int64_t t, seeker_rem
         float bias = strcmp(node, "R2") ? -0.15f : scene == STEP_OUT_FAR ? 0.30f : 0.25f;
         c->bearing_deg = b + 0.7f * (float)gauss();
         c->range_m = r * (1.0f + bias + 0.04f * (float)gauss());
+        if (s > 0) /* phone.html's eye-to-ankle height shrinks with the crouch */
+            c->range_m *= phone_height(BODY) / phone_height((const float (*)[2])body);
     } else { /* phone.html: hip midpoint bearing (a guess, 1.5 deg off), box-height range */
         c->bearing_deg = b + 1.5f + 0.7f * (float)gauss();
         c->range_m = f * 1.7f / c->box[3];
@@ -169,7 +213,13 @@ static void make_msg(int scene, const char *node, pose3 p, int64_t t, seeker_rem
 typedef struct {
     int ids, two_ticks, seen_frames, look_flips, fade_frames, tracks_partial_alone;
     double max_step, err_p50, err_p95;
+    /* crouch scene, from CROUCH_SETTLED_MS: ticks, ticks with two tracks, ticks the one track is
+     * CROUCH, frames, x-ray people drawn, and the farthest any track is from the person (m) and
+     * to the right of them as R1 sees it (m, R1 faces +y) */
+    int c_ticks, c_two, c_crouch, c_frames, c_xray;
+    double c_far, c_right;
 } metrics;
+#define CROUCH_SETTLED_MS (CROUCH_T0 + CROUCH_DOWN_MS + 400)
 
 static int cmp_d(const void *a, const void *b)
 {
@@ -177,13 +227,14 @@ static int cmp_d(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
-static void run(int scene, int handoff, const char *cfg_path, metrics *out)
+static void run(int scene, int handoff, int crouch_range, const char *cfg_path, metrics *out)
 {
     static seeker_config cfg;
     seeker_config_load(&cfg, cfg_path);
     static seeker_fusion f;
     seeker_fusion_init(&f, &cfg);
     f.handoff = handoff;
+    f.crouch_range = crouch_range;
     const pose3 R2 = scene == STEP_OUT_FAR ? R2_FAR : R2_NEAR;
     seeker_pose p1 = { R1.x, R1.y, R1.yaw }, p2 = { R2.x, R2.y, R2.yaw };
     seeker_fusion_set_pose(&f, "R1", &p1, "cli", 1);
@@ -217,7 +268,7 @@ static void run(int scene, int handoff, const char *cfg_path, metrics *out)
     static double errs[MAXE];
     int nerr = 0;
     memset(out, 0, sizeof *out);
-    const int64_t end = scene <= STEP_OUT_FAR ? 5000 : 4000;
+    const int64_t end = scene <= STEP_OUT_FAR || scene == CROUCH ? 5000 : 4000;
 
     for (int64_t now = 0; now < end; now++) {
         for (int n = 0; n < 2; n++)
@@ -247,6 +298,19 @@ static void run(int scene, int handoff, const char *cfg_path, metrics *out)
                 if (!known && nids < 8)
                     ids[nids++] = k->id;
             }
+            if (scene == CROUCH && now >= CROUCH_SETTLED_MS) {
+                float tx, ty;
+                truth(scene, now, &tx, &ty);
+                out->c_ticks++;
+                out->c_two += latest.n > 1;
+                out->c_crouch += latest.n == 1 && latest.tracks[0].posture == SEEKER_POSTURE_CROUCH;
+                for (int i = 0; i < latest.n; i++)
+                    if (latest.tracks[i].has_room) {
+                        const seeker_track *k = &latest.tracks[i];
+                        out->c_far = fmax(out->c_far, hypotf(k->room_x_m - tx, k->room_y_m - ty));
+                        out->c_right = fmax(out->c_right, k->room_x_m - tx);
+                    }
+            }
             if (latest.n == 1 && latest.tracks[0].has_room) {
                 const seeker_track *k = &latest.tracks[0];
                 if (have_last)
@@ -254,7 +318,8 @@ static void run(int scene, int handoff, const char *cfg_path, metrics *out)
                 last_x = k->room_x_m, last_y = k->room_y_m, have_last = 1;
                 float tx, ty;
                 truth(scene, now, &tx, &ty);
-                if (r1_first >= 0 && now >= r1_first + 400 && nerr < MAXE)
+                int64_t from = scene == CROUCH ? CROUCH_SETTLED_MS : r1_first + 400;
+                if (r1_first >= 0 && now >= from && nerr < MAXE)
                     errs[nerr++] = hypotf(k->room_x_m - tx, k->room_y_m - ty);
             } else {
                 have_last = 0;
@@ -267,6 +332,11 @@ static void run(int scene, int handoff, const char *cfg_path, metrics *out)
         for (int i = 0; i < v.last.n_drawn; i++)
             out->seen_frames += v.last.drawn[i].direct;
         out->fade_frames += v.last.n_fading > 0;
+        if (scene == CROUCH && now >= CROUCH_SETTLED_MS) {
+            out->c_frames++;
+            for (int i = 0; i < v.last.n_drawn; i++)
+                out->c_xray += !v.last.drawn[i].direct;
+        }
         if (v.last.n_drawn == 1 && r1_first >= 0) {
             int look = v.last.drawn[0].direct;
             if (last_look >= 0 && look != last_look)
@@ -315,16 +385,25 @@ int main(int argc, char **argv)
         for (int s = 0; s < N_SCENES; s++)
             for (int h = 0; h < 2; h++) {
                 g_seed = seed + (unsigned)s;
-                run(s, h, cfg_path, &m[s][h]);
+                /* the crouch scene's before is the handoff on, the crouch height model off */
+                run(s, s == CROUCH ? 1 : h, h, cfg_path, &m[s][h]);
             }
         flips[an] = m[STEP_OUT][1].look_flips;
         fades[an] = m[STEP_OUT][1].fade_frames;
-        printf("handoff replay, animations %s, same seed per scene (before = --no-handoff / --handoff off):\n",
+        printf("handoff replay, animations %s, same seed per scene (before = --no-handoff / --handoff off;\n"
+               "crouch: before = --no-crouch-range):\n",
                an ? "on" : "off");
         for (int s = 0; s < N_SCENES; s++) {
             printf("%s\n", SCENE[s]);
             print("before", &m[s][0]);
             print("after", &m[s][1]);
+        }
+        for (int h = 0; h < 2; h++) {
+            const metrics *cm = &m[CROUCH][h];
+            printf("  %-6s crouched %d ticks: two tracks %d, one track CROUCH %d; %d frames, x-ray drawn %d; "
+                   "farthest track %.2f m from the person, %.2f m right of them\n",
+                   h ? "after" : "before", cm->c_ticks, cm->c_two, cm->c_crouch, cm->c_frames, cm->c_xray,
+                   cm->c_far, cm->c_right);
         }
         const metrics *so = &m[STEP_OUT][1], *sl = &m[STEP_OUT_R2_LOST][1], *sf = &m[STEP_OUT_FAR][1];
         const metrics *ho = &m[HAND_OUT][1];
@@ -349,6 +428,14 @@ int main(int argc, char **argv)
              "hand-out: one x-ray person, R1's part sighting neither a second person nor SEEN");
         WANT(ho->err_p50 < m[HAND_OUT][0].err_p50, "hand-out: R1's bearing pulls the ghost onto the person");
         WANT(m[PARTIAL_ALONE][1].tracks_partial_alone == 0, "partial alone: R1's part sighting starts no track");
+        const metrics *cr = &m[CROUCH][1];
+        WANT(cr->ids == 1 && cr->two_ticks == 0 && cr->c_two == 0,
+             "crouch: one track id, never a second copy");
+        WANT(cr->c_frames > 0 && cr->c_xray == 0 && cr->seen_frames > 0,
+             "crouch: SEEN all the way down, no x-ray copy drawn");
+        WANT(cr->c_ticks > 0 && cr->c_crouch >= cr->c_ticks - 3, "crouch: posture CROUCH once down");
+        WANT(cr->c_far < 0.35 && cr->c_right < 0.25 && cr->err_p95 < 0.25,
+             "crouch: the track stays on the person (no copy off to the right)");
     }
     WANT(flips[0] == flips[1] && fades[0] == fades[1], "step-out: same look change and crossfade, animations on or off");
     printf("%s\n", fails ? "handoff targets missed" : "all handoff targets met");
