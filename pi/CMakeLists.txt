@@ -141,6 +141,13 @@ target_include_directories(sim_smooth PRIVATE display)
 target_link_libraries(sim_smooth seeker_fusion_core seeker_video seeker_draw)
 target_compile_definitions(sim_smooth PRIVATE SEEKER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_test(NAME smoothness COMMAND sim_smooth WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+# Handoff replay (tests/test_handoff.c): x-ray person R1 then sees (step-out, hand-out), before
+# and after the handoff changes.
+add_executable(test_handoff tests/test_handoff.c display/projection.c display/wearer_view.c)
+target_include_directories(test_handoff PRIVATE display)
+target_link_libraries(test_handoff seeker_fusion_core seeker_video seeker_draw)
+target_compile_definitions(test_handoff PRIVATE SEEKER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME handoff COMMAND test_handoff WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(test_supervisor tests/test_supervisor.c)
 target_link_libraries(test_supervisor seeker_sv)
 add_test(NAME supervisor_unit COMMAND test_supervisor)

@@ -1097,15 +1097,15 @@ static void learn_range_ratio(const seeker_fusion *f, seeker_fusion_mem *mm, con
         float q = clampf(hypotf(cl->fix.x_m - r->x_m, cl->fix.y_m - r->y_m) / r->range_m, 0.5f, 2.0f);
         int n = r->node;
         float k = range_ratio(mm, n, now_ms);
-        mm->rk[n] = k + 0.2f * (q - k);
+        mm->rk[n] = mm->rk_ms[n] ? k + 0.2f * (q - k) : q; /* the first fused fix is the best yet */
         mm->rk_ms[n] = now_ms;
     }
 }
 
 /* The track's node set changes (another phone takes over or joins) and the new fix is more than
- * SEEKER_HANDOFF_MIN_M from where the track was drawn: the filters restart at the new fix (a
- * change of measurement is not motion: no velocity kick, no slow slide), and (hx, hy) gets the
- * old position for the glide. Returns 1 then. */
+ * SEEKER_HANDOFF_MIN_M from where the track was drawn: the filters move to the new fix and keep
+ * their velocity (a change of measurement is not motion: no velocity kick, no slow slide, no lag
+ * on someone still walking), and (hx, hy) gets the old position for the glide. Returns 1 then. */
 static int handoff_start(const seeker_fusion *f, seeker_fusion_mem *mm, unsigned mask, float x, float y,
                          int64_t now_ms, float *hx, float *hy)
 {
@@ -1120,8 +1120,12 @@ static int handoff_start(const seeker_fusion *f, seeker_fusion_mem *mm, unsigned
     }
     if (hypotf(x - *hx, y - *hy) < SEEKER_HANDOFF_MIN_M)
         return 0;
-    mm->ab.valid = 0;
-    mm->rf.valid = 0;
+    float h = clampf((float)(now_ms - mm->ab_rx_ms) / 1000.0f, 0, (float)f->cfg->smooth_reset_ms / 1000.0f);
+    mm->ab.x = x - mm->ab.vx * h; /* so the filter's prediction for now is the new fix */
+    mm->ab.y = y - mm->ab.vy * h;
+    mm->rf.valid = 0; /* restarts at the new fix's distance from its phone */
+    mm->pv_x = mm->ab.x;
+    mm->pv_y = mm->ab.y;
     return 1;
 }
 
