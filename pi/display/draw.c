@@ -219,6 +219,14 @@ void draw_set_dash_phase(float px)
     g_dash_phase = px;
 }
 
+float draw_dash_start(float dash, float gap)
+{
+    float period = dash + (gap > 0 ? gap : 0);
+    if (g_dash_phase == 0.0f || period <= 0)
+        return 0.0f;
+    return fmodf(g_dash_phase, period) - period;
+}
+
 uint32_t draw_mix(uint32_t d, uint32_t s, int a)
 {
     if (a <= 0)
@@ -461,10 +469,8 @@ void draw_dashed_aa(canvas *c, float x0, float y0, float x1, float y1, float wid
     }
     if (gap < 0)
         gap = 0;
-    float ux = dx / len, uy = dy / len, a0 = 0;
-    if (g_dash_phase != 0.0f) /* pattern shifted forward along the line (marching dashes) */
-        a0 = fmodf(g_dash_phase, dash + gap) - (dash + gap);
-    for (float a = a0; a < len && a < 20000.0f; a += dash + gap) {
+    float ux = dx / len, uy = dy / len;
+    for (float a = draw_dash_start(dash, gap); a < len && a < 20000.0f; a += dash + gap) {
         float b = a + dash < len ? a + dash : len, s = a > 0 ? a : 0;
         if (b > s)
             draw_line_aa(c, x0 + ux * s, y0 + uy * s, x0 + ux * b, y0 + uy * b, width, cap, col, alpha);

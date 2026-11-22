@@ -234,13 +234,24 @@ typedef struct {
     float x0, y0, x1, y1;
 } ap_run;
 
+/* Halo under one run: AP_HALO_W wider, reaching as far past each end as to the sides. */
+static void halo(canvas *c, float u, const ap_run *r, float w, int a)
+{
+    float e = AP_HALO_W * u * 0.5f, dx = r->x1 - r->x0, dy = r->y1 - r->y0, L = sqrtf(dx * dx + dy * dy);
+    if (L > 1e-4f)
+        dx = dx / L * e, dy = dy / L * e;
+    else
+        dx = dy = 0;
+    draw_line_aa(c, r->x0 - dx, r->y0 - dy, r->x1 + dx, r->y1 + dy, w + 2 * e, DRAW_CAP_BUTT, RGB(0, 0, 0),
+                 AP_HALO_A * a / 255);
+}
+
 static void runs(canvas *c, float u, const ap_run *r, int n, float w, uint32_t col, int a)
 {
     if (a <= 0)
         return;
     for (int i = 0; i < n; i++)
-        draw_line_aa(c, r[i].x0, r[i].y0, r[i].x1, r[i].y1, w + AP_HALO_W * u, DRAW_CAP_BUTT, RGB(0, 0, 0),
-                     AP_HALO_A * a / 255);
+        halo(c, u, &r[i], w, a);
     for (int i = 0; i < n; i++)
         draw_line_aa(c, r[i].x0, r[i].y0, r[i].x1, r[i].y1, w, DRAW_CAP_BUTT, col, a);
 }
@@ -263,8 +274,7 @@ void ap_seen_frame(canvas *c, float u, int xi, int yi, int wi, int hi, uint32_t 
         r[n++] = (ap_run){ x - t8, my, x + t8, my };
         r[n++] = (ap_run){ x + w - t8, my, x + w + t8, my };
         for (int i = 0; i < n; i++)
-            draw_line_aa(c, r[i].x0, r[i].y0, r[i].x1, r[i].y1, sw + AP_HALO_W * u, DRAW_CAP_BUTT, RGB(0, 0, 0),
-                         AP_HALO_A * am / 255);
+            halo(c, u, &r[i], sw, am);
         draw_poly_style fs = { 0 };
         fs.edge = col;
         fs.edge_a = am;
