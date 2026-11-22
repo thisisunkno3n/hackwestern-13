@@ -354,15 +354,24 @@ void ap_leader(canvas *c, float u, float x0, float y0, float x1, float y1, uint3
     else
         kx = x0, ky = y1 + (y0 < y1 ? -dx : dx);
     float l1 = hypotf(kx - x0, ky - y0), l2 = hypotf(x1 - kx, y1 - ky), d = fx->leader * (l1 + l2);
+    ap_run r[2];
+    int n = 0;
     if (d <= l1) {
         float t = l1 > 0 ? d / l1 : 1.0f;
-        draw_line_aa(c, x0, y0, x0 + t * (kx - x0), y0 + t * (ky - y0), lw, DRAW_CAP_SQUARE, col, 255);
+        r[n++] = (ap_run){ x0, y0, x0 + t * (kx - x0), y0 + t * (ky - y0) };
     } else {
         float t = l2 > 0 ? (d - l1) / l2 : 1.0f;
-        draw_line_aa(c, x0, y0, kx, ky, lw, DRAW_CAP_SQUARE, col, 255);
-        draw_line_aa(c, kx, ky, kx + t * (x1 - kx), ky + t * (y1 - ky), lw, DRAW_CAP_SQUARE, col, 255);
+        r[n++] = (ap_run){ x0, y0, kx, ky };
+        r[n++] = (ap_run){ kx, ky, kx + t * (x1 - kx), ky + t * (y1 - ky) };
     }
-    int s = (int)lroundf(6 * u);
+    /* Halos first (as on the person strokes), then the line and the start square. */
+    int s = (int)lroundf(6 * u), hs = s + (int)lroundf(AP_HALO_W * u);
+    for (int i = 0; i < n; i++)
+        draw_line_aa(c, r[i].x0, r[i].y0, r[i].x1, r[i].y1, lw + AP_HALO_W * u, DRAW_CAP_SQUARE, RGB(0, 0, 0),
+                     AP_HALO_A);
+    draw_fill_a(c, (int)lroundf(x0) - hs / 2, (int)lroundf(y0) - hs / 2, hs, hs, RGB(0, 0, 0), AP_HALO_A);
+    for (int i = 0; i < n; i++)
+        draw_line_aa(c, r[i].x0, r[i].y0, r[i].x1, r[i].y1, lw, DRAW_CAP_SQUARE, col, 255);
     draw_fill_a(c, (int)lroundf(x0) - s / 2, (int)lroundf(y0) - s / 2, s, s, col, 255);
 }
 
