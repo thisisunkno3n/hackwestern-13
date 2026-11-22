@@ -230,6 +230,10 @@ void plan_map(canvas *c, float u, int x, int y, int w, int h, float ppm, float w
     if (cw <= 4 || ch <= 4)
         return;
     canvas v = { c->px + (size_t)cy0 * (size_t)c->stride + (size_t)cx0, cw, ch, c->stride };
+    /* Rings (anim_map) may spill past the drawing area onto the whole plate. */
+    int rx0 = x + 1 > 0 ? x + 1 : 0, ry0 = y + 1 > 0 ? y + 1 : 0;
+    int rx1 = x + w - 1 < c->w ? x + w - 1 : c->w, ry1 = y + h - 1 < c->h ? y + h - 1 : c->h;
+    canvas rv = { c->px + (size_t)ry0 * (size_t)c->stride + (size_t)rx0, rx1 - rx0, ry1 - ry0, c->stride };
     plan_geo g = { (float)w * 0.5f - 1.0f, (float)(y + (int)lroundf((float)h * wy)) - (float)cy0, ppm,
                    wearer->yaw_deg, wearer };
     float far = (float)(cw + ch) * 2.0f;
@@ -301,7 +305,7 @@ void plan_map(canvas *c, float u, int x, int y, int w, int h, float ppm, float w
         px = clampf(px, 7 * u, (float)cw - 7 * u);
         py = clampf(py, 7 * u, (float)ch - 7 * u);
         float s = 10 * u;
-        anim_map_rings(&v, u, m, px, py);
+        anim_map_rings(&rv, u, m, px + (float)(cx0 - rx0), py + (float)(cy0 - ry0));
         if (m->kind == PLAN_SEEN)
             draw_fill_a(&v, (int)lroundf(px - s / 2), (int)lroundf(py - s / 2), (int)lroundf(s), (int)lroundf(s),
                         m->close ? P_RED : P_INK, 255);
