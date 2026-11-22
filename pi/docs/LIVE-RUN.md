@@ -819,7 +819,7 @@ phone's frame, with a real shin (MediaPipe invents hidden legs and often folds t
   staircase the other foot is a step or two up with its knee bent.
 - CROUCH: BOTH legs folded: squatting, kneeling, sitting. A leg is folded when its knee is under
   120 deg, or the knee is less than 0.45 torso lengths below the hip, or the leg is short: hip to
-  ankle under 0.41 of the body height in the picture, with the knee under 0.75 torso lengths below
+  ankle under 0.22 of the body height in the picture, with the knee under 0.75 torso lengths below
   the hip. The body height comes from whatever the view shortens least (thigh or shin side on, the
   torso, the shoulder line facing the phone). The short-leg test is what catches a crouch facing
   the phone from chest height: there the knees point at the camera, the 2D knee angle stays near
@@ -851,7 +851,7 @@ phone's frame, with a real shin (MediaPipe invents hidden legs and often folds t
   | `SEEKER_POSTURE_LEG_VIS` | `0.5` | hidden legs still count (raise to `0.6`), or real legs drop out and everyone reads UNKNOWN (lower to `0.4`) |
   | `SEEKER_POSTURE_CROUCH_KNEE` | `120` | real crouches are missed (raise to `130`) |
   | `SEEKER_POSTURE_CROUCH_THIGH` | `0.45` | sitting facing the phone is missed (raise to `0.55`) |
-  | `SEEKER_POSTURE_CROUCH_LEG` | `0.41` | a crouch facing the phone is still read late (raise to `0.43`), or standing people read CROUCH (lower to `0.38`; `0` turns the short-leg test off) |
+  | `SEEKER_POSTURE_CROUCH_LEG` | `0.22` | from the Pi run of 2026-11-22: standing legs read 0.33 to 0.48, crouched 0.00 to 0.15 (0.41 called standing people crouched). A crouch read late: raise toward `0.28`; standing people read CROUCH: lower (`0` turns the short-leg test off) |
   | `SEEKER_POSTURE_STAND_KNEE` | `150` | standing people stay UNKNOWN (lower to `140`) |
   | `SEEKER_POSTURE_STAND_THIGH` | `0.6` | the same, with the thigh short in the picture (phone far above or below) |
   | `SEEKER_POSTURE_ONE_LEG` | `0` | `1`: a single deeply folded leg (knee under 100 deg, thigh level) is enough for CROUCH, for side views where the far leg is hidden. Risk: a big stair step |

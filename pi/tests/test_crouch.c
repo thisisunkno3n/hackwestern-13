@@ -881,6 +881,17 @@ int main(int argc, char **argv)
 {
     unsigned seed = 11;
     int old_phone = 0, tab = 0;
+    /* The short-leg cue at the value this file's jointed model was fitted to. The shipped default
+     * is 0.22: on the real phones (Pi run of 2026-11-22) a standing person's legs read 0.33 to
+     * 0.48 and a crouched one's 0.00 to 0.15, so 0.41 called standing people crouched. The model
+     * here puts a frontal crouch near 0.40, which the phones do not; it needs refitting to real
+     * landmarks before its frontal numbers mean anything. */
+    {
+        seeker_posture_tune pt;
+        seeker_posture_tune_defaults(&pt);
+        pt.crouch_leg = 0.41f;
+        seeker_posture_set_tune(&pt);
+    }
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--old-phone"))
             old_phone = 1;
