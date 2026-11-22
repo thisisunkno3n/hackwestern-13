@@ -4035,11 +4035,11 @@ static void test_anim_person(void)
     anim_person_end();
     f = ap_step(L + AP_FORGET_MS + 500, 5, 1);
     CHECK(f.plate == 0.0f && f.trace < 0.5f);
-    /* Seen to behind a wall: new marks intro, same plate. */
+    /* Seen to behind a wall: no intro (the handoff crossfade changes the look), same plate. */
     anim_person_reset();
     ap_run_to(T, L, 7, 1);
     f = ap_step(L + 33, 7, 0);
-    CHECK(f.hatch < 1.0f && f.mark_a < 1.0f && f.plate == 1.0f);
+    CHECK(f.hatch == 1.0f && f.mark_a == 1.0f && f.plate == 1.0f && f.march != 0.0f);
 
     /* Capacity: 40 people in one frame (more than fusion ever sends): AP_SLOTS animated, the rest
      * drawn plainly. The next frame, SEEKER_MAX_TRACKS new people: the 40 are not drawn any more, so
@@ -4170,8 +4170,9 @@ static void test_anim_person(void)
 
 /* ---- the three plan animation modules on one clock and one switch (display/anim.h) ---- */
 
-/* A seen person and one behind a wall arriving at `arrive`, the wearer fixed; hud_render at `now`. */
-static void anim_all_frame(canvas *c, wv_view *v, seeker_tracks *t, int64_t now, int64_t arrive)
+/* A seen person and one behind a wall arriving at `arrive`, the wearer fixed; hud_render at `now`.
+ * look2: the second person is seen by the wearer's phone too (a look change when it flips). */
+static void anim_all_frame2(canvas *c, wv_view *v, seeker_tracks *t, int64_t now, int64_t arrive, int look2)
 {
     static seeker_config cfg;
     seeker_config_defaults(&cfg);
@@ -4180,7 +4181,7 @@ static void anim_all_frame(canvas *c, wv_view *v, seeker_tracks *t, int64_t now,
     add_node(t, "R2", "ok", -2, 1, 90);
     if (now >= arrive) {
         add_track(t, "W", "W", 1, -0.6f, 4.0f)->id = 1;
-        seeker_track *k = add_track(t, "R2", "R2", 1, 0.6f, 4.0f);
+        seeker_track *k = add_track(t, look2 ? "W,R2" : "R2", look2 ? "W" : "R2", 1, 0.6f, 4.0f);
         k->id = 2;
         k->has_pts = 1;
         for (int j = 0; j < SEEKER_N_JOINTS; j++) {
@@ -4199,6 +4200,11 @@ static void anim_all_frame(canvas *c, wv_view *v, seeker_tracks *t, int64_t now,
     hs.video_state = VIDEO_LOST;
     hs.now_ms = now;
     hud_render(c, &cfg, &hs);
+}
+
+static void anim_all_frame(canvas *c, wv_view *v, seeker_tracks *t, int64_t now, int64_t arrive)
+{
+    anim_all_frame2(c, v, t, now, arrive, 0);
 }
 
 static void anim_all_view(wv_view *v)
@@ -4264,6 +4270,40 @@ static void test_anim_switch(void)
     animated = canvas_diff(&a, &b);
     printf("anim switch: arrival frame differs from the still plan in %d px\n", animated);
     CHECK(animated > 200);
+    /* A look change: the person behind the wall steps into the wearer's view at T + 100. Fully
+     * still is --anim off plus --handoff off: every moment is the still plan of the new scene. */
+    same = 0;
+    for (int tries = 0; tries < 2 && !same; tries++) {
+        anim_set_enabled(0);
+        anim_all_view(&v);
+        v.cfg.handoff = 0;
+        anim_all_frame2(&b, &v, &t, 0, 0, 1); /* reference: the new scene, no clock */
+        int ok = 1;
+        static const int64_t at[] = { T + 100, T + 160, T + 400 };
+        for (int i = 0; i < 3; i++) {
+            anim_all_view(&v);
+            v.cfg.handoff = 0;
+            anim_all_frame2(&a, &v, &t, T - 500, T, 0);
+            anim_all_frame2(&a, &v, &t, T + 60, T, 0);
+            anim_all_frame2(&a, &v, &t, at[i], T, 1);
+            ok = ok && canvas_eq(&a, &b) && v.last.n_fading == 0;
+        }
+        same = ok;
+    }
+    CHECK(same);
+    /* With the handoff on the look change crossfades, animations on or off alike. */
+    for (int an = 0; an < 2; an++) {
+        anim_set_enabled(an);
+        anim_all_view(&v);
+        anim_all_frame2(&a, &v, &t, T - 500, T, 0);
+        anim_all_frame2(&a, &v, &t, T + 60, T, 0);
+        anim_all_frame2(&a, &v, &t, T + 100, T, 1);
+        anim_all_frame2(&a, &v, &t, T + 160, T, 1);
+        CHECK(v.last.n_fading == 1 && v.last.n_direct == 2);
+        anim_all_frame2(&a, &v, &t, T + 400, T, 1);
+        CHECK(v.last.n_fading == 0 && v.last.n_direct == 2);
+    }
+    anim_set_enabled(1);
     draw_set_theme(DRAW_THEME_CLASSIC);
     free(a.px);
     free(b.px);
@@ -4317,9 +4357,10 @@ static int ah_diff(const canvas *a, const canvas *b, int x0, int y0, int x1, int
 
 static void test_anim_handoff(void)
 {
-    /* The fx: a look change mid-intro keeps its hatch sweep and marching, loses its own fades. */
+    /* The fx: a look change never restarts the intro (the crossfade owns it); the ghost marches. */
     const int64_t T = 20000;
     anim_person_set_enabled(1);
+    anim_person_reset();
     anim_person_begin(T, 1.0f);
     anim_person_track(5, 1);
     anim_person_end();
@@ -4327,17 +4368,39 @@ static void test_anim_handoff(void)
     anim_person_track(5, 1);
     anim_person_end();
     anim_person_begin(T + 2040, 1.0f);
-    ap_fx f = anim_person_track(5, 0), g = ap_crossfading(f);
+    ap_fx f = anim_person_track(5, 0);
     anim_person_end();
-    CHECK(f.active && f.mark_a < 1.0f && f.hatch < 1.0f && f.march != 0.0f);
-    CHECK(g.active && g.mark_a == 1.0f && g.trace == 1.0f && g.hatch == f.hatch && g.march == f.march);
-    ap_fx o = ap_old_look(0), os = ap_old_look(1);
-    CHECK(o.march == f.march && o.mark_a == 1.0f && o.hatch == 1.0f && !os.active);
+    CHECK(f.mark_a == 1.0f && f.trace == 1.0f && f.hatch == 1.0f && f.plate == 1.0f && f.march != 0.0f);
+    CHECK(f.march == anim_person_march());
+    /* Back after its echo in the other look: the mark's intro, which a crossfade drops. */
+    anim_person_begin(T + 2100, 1.0f);
+    anim_person_end(); /* gone: echo */
+    anim_person_begin(T + 2700, 1.0f);
+    anim_person_end(); /* echo over: remembered */
+    anim_person_begin(T + 2800, 1.0f);
+    f = anim_person_track(5, 1);
+    ap_fx g = ap_crossfading(f);
+    anim_person_end();
+    CHECK(f.active && f.trace < 1.0f && f.plate == 1.0f);
+    CHECK(g.trace == 1.0f && g.mark_a == 1.0f && !g.active);
+    /* Still tracked but not drawn in view (anim_person_keep): no echo, no new arrival after. */
+    anim_person_begin(T + 4000, 1.0f);
+    anim_person_keep(5);
+    anim_person_end();
+    wv_item ei;
+    seeker_track ek;
+    int eb[4], echoes = 0;
+    for (int e = 0; e < AP_SLOTS; e++)
+        echoes += anim_person_echo(e, &ei, &ek, eb, &f);
+    anim_person_begin(T + 4100, 1.0f);
+    f = anim_person_track(5, 1);
+    anim_person_end();
+    CHECK(echoes == 0 && !f.active);
     anim_person_set_enabled(0);
-    CHECK(!ap_old_look(0).active && !ap_crossfading(anim_person_track(5, 0)).active);
+    CHECK(anim_person_march() == 0.0f && !ap_crossfading(anim_person_track(5, 0)).active);
 
     /* Rendered: 331500 ms is a whole number of march periods (test_anim_person), and 100 ms after
-     * the flip the crossfade is at 0.4 while the corner trace would still be open. */
+     * the flip the crossfade is at 0.4. */
     enum { W = 640, H = 360 };
     const int64_t S = 331500;
     canvas a = { calloc((size_t)W * H, 4), W, H, W }, b = { calloc((size_t)W * H, 4), W, H, W };
@@ -4357,14 +4420,14 @@ static void test_anim_handoff(void)
     CHECK(on.drawn[0].direct && on.drawn[0].x == off.drawn[0].x && on.drawn[0].w == off.drawn[0].w);
     int bx = on.drawn[0].x, by = on.drawn[0].y, bw = on.drawn[0].w, bh = on.drawn[0].h;
     int d_xfade = ah_diff(&a, &b, bx - 6, by - 6, bx + bw + 6, by + bh + 6);
-    /* --handoff off: no crossfade, so the person animations' own look change plays. */
+    /* --handoff off: no crossfade and no person intro either, the look just changes. */
     ah_run(&b, &v, 0, 0, S);
     ah_run(&a, &v, 1, 0, S);
     CHECK(v.last.n_fading == 0 && v.last.n_drawn == 1);
     int d_plain = ah_diff(&a, &b, bx - 6, by - 6, bx + bw + 6, by + bh + 6);
-    printf("anim handoff: mid-crossfade box differs anim on vs off in %d px (handoff on), %d px (handoff off)\n",
-           d_xfade, d_plain);
-    CHECK(d_xfade == 0 && d_plain > 50);
+    printf("anim handoff: box after the look change differs anim on vs off in %d px (handoff on, mid-crossfade), "
+           "%d px (handoff off)\n", d_xfade, d_plain);
+    CHECK(d_xfade == 0 && d_plain == 0);
     anim_set_enabled(1);
     draw_set_theme(DRAW_THEME_CLASSIC);
     free(a.px);

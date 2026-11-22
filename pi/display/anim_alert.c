@@ -194,21 +194,22 @@ static void outline(canvas *c, float u, float x, float y, float w, float h, floa
     draw_cut_rect(c, x, y, w, h, 0, &st);
 }
 
-void anim_alert_ring(canvas *c, float u, const anim_fx *f, float x, float y, float w, float h)
+void anim_alert_ring(canvas *c, float u, const anim_fx *f, float x, float y, float w, float h, float k)
 {
     if (!f || !f->on || f->ring < 0)
         return;
     /* Out from 6 px to 40 px off the frame, fading from 90%. */
     float d = (6.0f + 34.0f * ease_out(f->ring)) * u, fade = 1.0f - f->ring;
-    outline(c, u, x - d, y - d, w + 2 * d, h + 2 * d, 2.0f * u, P_ALERT, (int)lroundf(230.0f * fade * sqrtf(fade)));
+    outline(c, u, x - d, y - d, w + 2 * d, h + 2 * d, 2.0f * u, P_ALERT,
+            (int)lroundf(230.0f * fade * sqrtf(fade) * k));
 }
 
-void anim_alert_hull(canvas *c, float u, const anim_fx *f, float x, float y, float w, float h)
+void anim_alert_hull(canvas *c, float u, const anim_fx *f, float x, float y, float w, float h, float k)
 {
     if (!f || !f->on || !f->down)
         return;
-    plan_dash_rect(c, u, x, y, w, h, 2.0f * u, 10 * u, 7 * u, P_ALERT, anim_alert_alpha(f, 255));
-    anim_alert_ring(c, u, f, x, y, w, h);
+    plan_dash_rect(c, u, x, y, w, h, 2.0f * u, 10 * u, 7 * u, P_ALERT, (int)lroundf((float)anim_alert_alpha(f, 255) * k));
+    anim_alert_ring(c, u, f, x, y, w, h, k);
 }
 
 /* Convex polygon clipped to the half-plane (px - x0) + (y1 - py) <= k: a front at 45 degrees,

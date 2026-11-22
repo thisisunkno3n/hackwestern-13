@@ -14,7 +14,7 @@ typedef struct {
     int seen;        /* registered this frame */
     int stored;      /* item/track/box below are valid */
     int64_t born_ms; /* leader and plate timing */
-    int64_t kind_ms; /* mark intro timing (restarts when seen / x-ray flips) */
+    int64_t kind_ms; /* mark intro timing (arrival, or back after its echo; not a look change) */
     int64_t last_ms; /* last frame it was drawn in view */
     wv_item it;
     seeker_track k;
@@ -153,9 +153,10 @@ ap_fx anim_person_track(int id, int direct)
         s->born_ms = g_now - (AP_TRACE_MS + AP_LEADER_MS + AP_PLATE_MS);
         s->kind_ms = g_now;
         s->direct = direct;
-    } else if (s->direct != direct) {
-        s->direct = direct; /* walked behind a wall or out of it: new marks, same plate */
-        s->kind_ms = g_now;
+    } else {
+        /* Walked behind a wall or out of it: the handoff crossfade (wearer_view) changes the look,
+         * so the intro does not replay and the plate stays. */
+        s->direct = direct;
     }
     s->state = AP_LIVE;
     s->seen = 1;
@@ -230,14 +231,21 @@ ap_fx ap_crossfading(ap_fx f)
     return f;
 }
 
-ap_fx ap_old_look(int direct)
+float anim_person_march(void)
 {
-    ap_fx f = none();
-    if (g_on && !direct) {
-        f.march = g_march;
-        f.active = f.march != 0.0f;
-    }
-    return f;
+    return g_on ? g_march : 0.0f;
+}
+
+void anim_person_keep(int id)
+{
+    if (!g_on)
+        return;
+    ap_slot *s = find(id);
+    if (!s || (s->state != AP_LIVE && s->state != AP_ECHO))
+        return;
+    s->state = AP_LIVE;
+    s->seen = 1;
+    s->last_ms = g_now;
 }
 
 /* ---- drawing ---- */

@@ -15,8 +15,11 @@
  *   appear, x-ray    skeleton and hull start at AP_XRAY_A0 and reach full in AP_XRAY_FADE_MS, the
  *                    hull hatch sweeps in from the bottom-left corner (AP_HATCH_MS), leader and
  *                    plate as above.
- *   lost             a track that stops being drawn in view leaves an echo of its last frame or
- *                    skeleton (no plate), alpha falling from AP_ECHO_A0 to 0 over AP_LOST_MS.
+ *   lost             a track that is gone (not in this frame's tracks at all) leaves an echo of
+ *                    its last frame or skeleton (no plate), alpha falling from AP_ECHO_A0 to 0
+ *                    over AP_LOST_MS. One still tracked but not drawn in view (anim_person_keep)
+ *                    leaves none.
+ *   look change      not animated here: seen to x-ray or back is the handoff crossfade's.
  *   ambient          hidden-person dashes march at AP_MARCH_PX_S.
  *
  * Text and numbers are never animated. A track that comes back with the same id within
@@ -91,12 +94,15 @@ void anim_person_end(void);
  * track, box and the echo's fx; 0 if slot i is not a drawable echo. */
 int anim_person_echo(int i, wv_item *it, seeker_track *k, int box[4], ap_fx *fx);
 
+/* A track that still exists this frame but is not drawn in view (a duplicate, out of the view, no
+ * bearing): no echo, and no new arrival when it comes back into view. */
+void anim_person_keep(int id);
+/* Hidden-person dash phase this frame (frame px, 0 when off), for marks drawn without an fx. */
+float anim_person_march(void);
 /* Handoff crossfade (wearer_view.h, WV_XFADE_MS): while it runs, it alone sets the opacity of the
- * old and new looks. ap_crossfading drops the mark fade-in and the corner trace from the new look's
- * fx and keeps the hatch sweep and the marching dashes; ap_old_look is the outgoing look's fx (a
- * settled mark, its dashes still marching if it is an x-ray look). */
+ * old and new looks. A look change never restarts the intro; ap_crossfading also drops the mark
+ * fade-in and corner trace of a track coming back (same id, after its echo) in the other look. */
 ap_fx ap_crossfading(ap_fx fx);
-ap_fx ap_old_look(int direct);
 
 /* Drawing hooks (each one is the plain plan call when fx is inactive or settled). */
 int ap_alpha(const ap_fx *fx, int a);

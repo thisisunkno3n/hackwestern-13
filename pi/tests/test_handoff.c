@@ -25,6 +25,7 @@
  * the largest step of the sent position in one 33 ms tick, and the sent position's error
  * against the truth from 400 ms after R1 first saw them, past the 350 ms glide (p50 / p95). */
 
+#include "anim.h"
 #include "draw.h"
 #include "seeker_config.h"
 #include "seeker_fusion.h"
@@ -299,13 +300,7 @@ int main(int argc, char **argv)
         snprintf(cfg_path, sizeof cfg_path, "config/seeker.live.json");
 #endif
     draw_set_theme(DRAW_THEME_PLAN);
-    metrics m[N_SCENES][2];
-    for (int s = 0; s < N_SCENES; s++)
-        for (int h = 0; h < 2; h++) {
-            g_seed = seed + (unsigned)s;
-            run(s, h, cfg_path, &m[s][h]);
-        }
-    int fails = 0;
+    int fails = 0, flips[2] = { 0, 0 }, fades[2] = { 0, 0 };
 #define WANT(c, what)                                                                              \
     do {                                                                                           \
         if (!(c)) {                                                                                \
@@ -313,35 +308,49 @@ int main(int argc, char **argv)
             fails++;                                                                               \
         }                                                                                          \
     } while (0)
-    printf("handoff replay, same seed per scene (before = --no-handoff / --handoff off):\n");
-    for (int s = 0; s < N_SCENES; s++) {
-        printf("%s\n", SCENE[s]);
-        print("before", &m[s][0]);
-        print("after", &m[s][1]);
+    /* The whole replay with the plan animations on, then off: the handoff must not depend on them. */
+    for (int an = 1; an >= 0; an--) {
+        anim_set_enabled(an);
+        metrics m[N_SCENES][2];
+        for (int s = 0; s < N_SCENES; s++)
+            for (int h = 0; h < 2; h++) {
+                g_seed = seed + (unsigned)s;
+                run(s, h, cfg_path, &m[s][h]);
+            }
+        flips[an] = m[STEP_OUT][1].look_flips;
+        fades[an] = m[STEP_OUT][1].fade_frames;
+        printf("handoff replay, animations %s, same seed per scene (before = --no-handoff / --handoff off):\n",
+               an ? "on" : "off");
+        for (int s = 0; s < N_SCENES; s++) {
+            printf("%s\n", SCENE[s]);
+            print("before", &m[s][0]);
+            print("after", &m[s][1]);
+        }
+        const metrics *so = &m[STEP_OUT][1], *sl = &m[STEP_OUT_R2_LOST][1], *sf = &m[STEP_OUT_FAR][1];
+        const metrics *ho = &m[HAND_OUT][1];
+        WANT(so->ids == 1 && so->two_ticks == 0, "step-out: one track id, never two people");
+        WANT(so->look_flips == 1, "step-out: x-ray to seen once, no flicker on R1's missed frames");
+        WANT(so->fade_frames >= 3 && so->fade_frames <= 12, "step-out: the look crossfades (about 250 ms)");
+        WANT(so->max_step < 0.3 && so->max_step < m[STEP_OUT][0].max_step && so->err_p95 < 0.15,
+             "step-out: glides onto the fused fix and stays on it");
+        WANT(so->err_p95 <= m[STEP_OUT][0].err_p95 + 0.03, "step-out: as close to the truth as before (3 cm)");
+        WANT(sl->ids == 1 && sl->two_ticks == 0, "step-out, R2 lost: one track id, never two people");
+        /* R1 takes over: R2's 25% long range is gone. R1's 15% short one (0.28 m at 1.9 m) is left
+         * unless the phones' last and first messages overlap for a fused fix, as they do here (the
+         * phones are not in step), which teaches R1's range ratio. */
+        WANT(sl->max_step < 0.35 && sl->err_p95 < 0.45 && sl->err_p50 < m[STEP_OUT_R2_LOST][0].err_p50,
+             "step-out, R2 lost: no jump at the phone switch, R1's range from R1");
+        WANT(sf->ids == 1 && sf->two_ticks == 0 && sf->look_flips == 1,
+             "step-out, far R2: the 1.9 m correction keeps the track (one id, seen once)");
+        /* 1.9 m to correct: a 90 ms glide moves 31% of it in the first 33 ms tick, then less. */
+        WANT(sf->max_step < 0.7 && sf->max_step < 0.5 * m[STEP_OUT_FAR][0].max_step && sf->err_p95 < 0.35,
+             "step-out, far R2: glides onto the fused fix instead of jumping");
+        WANT(ho->ids == 1 && ho->two_ticks == 0 && ho->seen_frames == 0,
+             "hand-out: one x-ray person, R1's part sighting neither a second person nor SEEN");
+        WANT(ho->err_p50 < m[HAND_OUT][0].err_p50, "hand-out: R1's bearing pulls the ghost onto the person");
+        WANT(m[PARTIAL_ALONE][1].tracks_partial_alone == 0, "partial alone: R1's part sighting starts no track");
     }
-    const metrics *so = &m[STEP_OUT][1], *sl = &m[STEP_OUT_R2_LOST][1], *sf = &m[STEP_OUT_FAR][1];
-    const metrics *ho = &m[HAND_OUT][1];
-    WANT(so->ids == 1 && so->two_ticks == 0, "step-out: one track id, never two people");
-    WANT(so->look_flips == 1, "step-out: x-ray to seen once, no flicker on R1's missed frames");
-    WANT(so->fade_frames >= 3 && so->fade_frames <= 12, "step-out: the look crossfades (about 250 ms)");
-    WANT(so->max_step < 0.3 && so->max_step < m[STEP_OUT][0].max_step && so->err_p95 < 0.15,
-         "step-out: glides onto the fused fix and stays on it");
-    WANT(so->err_p95 <= m[STEP_OUT][0].err_p95 + 0.03, "step-out: as close to the truth as before (3 cm)");
-    WANT(sl->ids == 1 && sl->two_ticks == 0, "step-out, R2 lost: one track id, never two people");
-    /* R1 takes over: R2's 25% long range is gone. R1's 15% short one (0.28 m at 1.9 m) is left
-     * unless the phones' last and first messages overlap for a fused fix, as they do here (the
-     * phones are not in step), which teaches R1's range ratio. */
-    WANT(sl->max_step < 0.35 && sl->err_p95 < 0.45 && sl->err_p50 < m[STEP_OUT_R2_LOST][0].err_p50,
-         "step-out, R2 lost: no jump at the phone switch, R1's range from R1");
-    WANT(sf->ids == 1 && sf->two_ticks == 0 && sf->look_flips == 1,
-         "step-out, far R2: the 1.9 m correction keeps the track (one id, seen once)");
-    /* 1.9 m to correct: a 90 ms glide moves 31% of it in the first 33 ms tick, then less. */
-    WANT(sf->max_step < 0.7 && sf->max_step < 0.5 * m[STEP_OUT_FAR][0].max_step && sf->err_p95 < 0.35,
-         "step-out, far R2: glides onto the fused fix instead of jumping");
-    WANT(ho->ids == 1 && ho->two_ticks == 0 && ho->seen_frames == 0,
-         "hand-out: one x-ray person, R1's part sighting neither a second person nor SEEN");
-    WANT(ho->err_p50 < m[HAND_OUT][0].err_p50, "hand-out: R1's bearing pulls the ghost onto the person");
-    WANT(m[PARTIAL_ALONE][1].tracks_partial_alone == 0, "partial alone: R1's part sighting starts no track");
+    WANT(flips[0] == flips[1] && fades[0] == fades[1], "step-out: same look change and crossfade, animations on or off");
     printf("%s\n", fails ? "handoff targets missed" : "all handoff targets met");
     return fails ? 1 : 0;
 }

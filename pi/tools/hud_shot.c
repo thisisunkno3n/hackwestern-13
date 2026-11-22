@@ -352,8 +352,8 @@ static void bench_module(canvas *cv)
             anim_alert_frame(1100);
             double t0 = now_us();
             anim_fx f1 = anim_alert_track(1, 1, 1), f2 = anim_alert_track(2, 1, 1);
-            anim_alert_ring(cv, u, &f1, 200, 200, 420, 480);
-            anim_alert_hull(cv, u, &f2, 700, 420, 420, 200);
+            anim_alert_ring(cv, u, &f1, 200, 200, 420, 480, 1.0f);
+            anim_alert_hull(cv, u, &f2, 700, 420, 420, 200, 1.0f);
             anim_alert_plate(cv, u, 660, 300, l, 2, P_ALERT, 1, &f1);
             anim_alert_cell(cv, 0, 40, 670, (int)lroundf(15 * u), P_ALERT, "Video 1.2 s late", 24, 642, 200, 54);
             float sw, k;
