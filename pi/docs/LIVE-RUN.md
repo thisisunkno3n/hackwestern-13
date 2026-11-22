@@ -483,6 +483,48 @@ bridge serves) to get them; `?skel=0` on a phone link turns them off.
   `eagleeye:` line in `hud_display.log` ends with `skel N` (ghosts on screen).
 - `FUSION_ARGS=--no-skel-smooth` sends the raw joints, to compare.
 
+## X-ray to seen: one person when they step out or put a hand out
+
+A person behind the divider is an x-ray ghost from R2. When R1 starts to see them, it stays
+**one person with one track id**: the ghost dissolves into the seen box (250 ms), and the
+distance label, colour and plan mark carry on.
+
+- **Hand or shoulder round the edge.** R1's phone gets the range from the box of the visible
+  landmarks, so a head-and-arm box reads 2 to 3 times too far. Before, that was a second person
+  (`R1` box "Person 4.6 m" next to the ghost). Now a contact with no eyes plus ankles, no full
+  torso and a box not shaped like a whole person is **partial**. It places the person by its
+  bearing only. The person stays XRAY (the ghost lines up with the hand), and the plate still says
+  "seen by R2". A partial R1 sighting with nobody near its bearing starts no track.
+- **Stepping out.** Track identity allows for the x-ray position's range error (a mono range is
+  about 20 to 30% long or short along R2's ray), with a wider gate while a phone joins. Before,
+  an R2 about 6 m away reading 30% long gave the person a new id and a 2 m jump. Now the
+  position glides onto the two-phone fix over about 350 ms and keeps its walking speed.
+- **R1 missing frames.** A person R1 saw stays seen for 400 ms, so the look no longer flips at
+  the phone's frame rate. Fusion keeps what the two-phone fix taught about each phone's range, so
+  the ghost does not jump back by R2's error when R1 loses them (it fades back to the phone's own
+  range over a few seconds).
+
+Host replay (`build/test_handoff`, ctest `handoff`; before = old code on the same seed):
+
+| Scene | Before | After |
+| --- | --- | --- |
+| Step out, R2 still sees | 5 look changes, 0.32 m jump | 1 look change, 8 crossfade frames, 0.21 m step |
+| Step out, R2 loses them | 0.50 m error (R2's range reused on R1's ray) | 0.06 m |
+| Step out, far R2 (30% long) | 2 ids, 1.98 m jump, 7 look changes | 1 id, glide (0.62 m first tick), 1 look change |
+| Hand out | 2 people for 37 ticks, drawn SEEN 54 frames, ghost 0.40 m off | 1 x-ray person, 0.23 m off |
+| R1 sees only a hand, nobody else | a person 2.3 m off | nothing |
+
+Logs: `hud_fusion.log` starts with `handoff: partial contacts by bearing ...`; with `--debug`,
+`track N handoff to R1+R2: X m from where it was, gliding over 350 ms`. `hud_display.log`:
+`eagleeye: handoff: a person R1 saw stays seen 400 ms ...`. To compare on stage:
+`FUSION_ARGS=--no-handoff HUD_ARGS="--handoff off" sh scripts/run-live.sh` is the old behaviour.
+
+Timing: the x-ray ghost is drawn from R2's newest report moved on by up to 100 ms
+(`fusion.predict_ms`), over R1's video, which is 120 to 170 ms old (the `LAT` line). With
+someone walking at 0.8 m/s it leads the picture by about 0.15 m (about 30 px at 2.5 m). That is
+small next to R2's range error, which the two-phone fix removes once R1 sees them.
+`FUSION_ARGS="--predict-ms 0"` takes the 100 ms out if the lead shows.
+
 ## Morrissette calibration (tag 0 only, both phones fixed)
 
 Tag 7 is not needed: `R2_MODE` defaults to `pin` and `WEARER_MODE=fixed` pins R1, both from

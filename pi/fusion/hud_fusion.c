@@ -4,7 +4,7 @@
  *
  *   hud_fusion [--config config/seeker.json] [--debug] [--run-for <s>] [--no-health]
  *              [--no-smooth] [--smooth-alpha a] [--smooth-beta b] [--smooth-gate m]
- *              [--no-range-smooth] [--no-pose-gate] [--no-pose-smooth] [--no-pose-flip]
+ *              [--no-range-smooth] [--no-pose-gate] [--no-pose-smooth] [--no-pose-flip] [--no-handoff]
  *              [--pose ID=x_m,y_m,yaw_deg]... [--init-pose ID=x_m,y_m,yaw_deg]... [--poses FILE] [--pose-source message|config]
  *              [--tag-pose TAG=x_m,y_m,yaw_deg]... [--tag-frame ID=tag_x_m,tag_y_m,tag_yaw_deg]...
  *
@@ -31,6 +31,9 @@
  * --ground-range.
  * --no-pose-flip turns off the tag flip catch (SEEKER_POSE_FLIP_*: a live pose that is the
  * mirror solution of a flat tag is taken as its mirror; the jump gate alone decides).
+ * --no-handoff turns off the phone-to-phone handoff (seeker_fusion.h SEEKER_HANDOFF_*: partial
+ * contacts by bearing, covariance track gate, glide on a node set change, learned range ratios)
+ * and runs the old track identity code.
  * --no-pose-smooth takes every live message pose as is (no One Euro, SEEKER_POSE_*_CUTOFF).
  * --no-pose-gate turns off the jump gate on live message poses (seeker_fusion.h): every full
  * message pose is then taken at once, one-frame tag flips included.
@@ -105,7 +108,7 @@ static void usage(const char *argv0)
     fprintf(stderr,
             "usage: %s [--config f] [--debug] [--run-for s] [--no-health]\n"
             "          [--no-smooth] [--smooth-alpha 0..1] [--smooth-beta 0..1] [--smooth-gate m]\n"
-            "          [--no-range-smooth] [--no-pose-gate] [--no-pose-smooth] [--no-pose-flip]\n"
+            "          [--no-range-smooth] [--no-pose-gate] [--no-pose-smooth] [--no-pose-flip] [--no-handoff]\n"
             "          [--no-skel-smooth] [--person-h m] [--range-scale ID=k] [--no-range-hfov]\n"
             "          [--cam-h ID=m] [--cam-pitch ID=deg] [--ground-range]\n"
             "          [--wearer-node ID] [--predict-ms N] [--hfov ID=deg|preset]...\n"
@@ -136,7 +139,7 @@ int main(int argc, char **argv)
     int debug = 0, use_health = 1;
     double run_for = 0;
     int no_smooth = 0, no_range_smooth = 0, no_pose_gate = 0, no_skel_smooth = 0, predict_ms = -1;
-    int no_pose_smooth = 0, no_pose_flip = 0;
+    int no_pose_smooth = 0, no_pose_flip = 0, no_handoff = 0;
     const char *wearer_node = NULL;
     const char *hfov_args[SEEKER_MAX_NODES];
     int n_hfov = 0;
@@ -211,6 +214,8 @@ int main(int argc, char **argv)
             no_pose_smooth = 1;
         else if (!strcmp(argv[i], "--no-pose-flip"))
             no_pose_flip = 1;
+        else if (!strcmp(argv[i], "--no-handoff"))
+            no_handoff = 1;
         else if (!strcmp(argv[i], "--no-skel-smooth"))
             no_skel_smooth = 1;
         else if (!strcmp(argv[i], "--wearer-node") && i + 1 < argc)
@@ -280,6 +285,7 @@ int main(int argc, char **argv)
     fus.pose_gate = !no_pose_gate;
     fus.pose_smooth = !no_pose_smooth;
     fus.pose_flip = !no_pose_flip;
+    fus.handoff = !no_handoff;
     fus.skel_smooth = !no_skel_smooth;
     for (int i = 0; i < n_hfov; i++) {
         char id[SEEKER_NODE_LEN];
@@ -474,6 +480,13 @@ int main(int argc, char **argv)
                fus.tri.min_cross_deg, fus.tri.min_cross_bearing_only_deg);
     seeker_log("track identity: gate max(%.1f m, min(%.1f sigma, %.1f m)), coast %d ms",
                cfg.smooth_gate_m, cfg.track_gate_sigmas, cfg.track_gate_max_m, cfg.drop_ms);
+    if (fus.handoff)
+        seeker_log("handoff: partial contacts by bearing (x%.0f sigma), covariance gate %.0f sigma (+1 on "
+                   "a node set change), glide %d ms, learned range ratios fade over %.0f s",
+                   fus.tri.partial_bearing_k, cfg.track_gate_sigmas, SEEKER_HANDOFF_MS,
+                   SEEKER_HANDOFF_RK_TAU_MS / 1000.0f);
+    else
+        seeker_log("handoff: off (--no-handoff), old track identity");
     if (fus.skel_smooth)
         seeker_log("skeletons (pts): One Euro per joint (min cutoff %.1f Hz, beta %.1f), joints "
                    "under visibility %.2f held %d ms, whole skeleton held %d ms, up to %d per "

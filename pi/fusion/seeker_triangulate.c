@@ -21,6 +21,7 @@ void seeker_tri_defaults(seeker_tri_opts *o)
     o->assoc_m = 0.8f;
     o->prior_sigma_m = 0.5f;
     o->prior_cap = 9.0f;
+    o->partial_bearing_k = 2.0f;
 }
 
 const char *seeker_tri_method_name(seeker_tri_method m)
@@ -48,7 +49,22 @@ static void unit(const seeker_ray *r, double *ux, double *uy)
 
 static double sigma_cross(const seeker_tri_opts *o, const seeker_ray *r, double dist)
 {
-    return fmax(dist, MIN_DIST_M) * (o->bearing_sigma_deg * DEG2RAD) / conf_of(r);
+    double k = r->partial && o->partial_bearing_k > 1.0f ? o->partial_bearing_k : 1.0;
+    return fmax(dist, MIN_DIST_M) * (o->bearing_sigma_deg * DEG2RAD) * k / conf_of(r);
+}
+
+/* Does any whole-body ray in the set have a range? Then partial rays count by bearing only. */
+static int whole_range(const seeker_ray *r, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (r[i].has_range && !r[i].partial)
+            return 1;
+    return 0;
+}
+
+static int ranged(const seeker_ray *r, int whole)
+{
+    return r->has_range && (!r->partial || !whole);
 }
 
 static double range_sigma(const seeker_tri_opts *o, double range, double conf)
@@ -107,12 +123,13 @@ static void offsets(const seeker_ray *r, double x, double y, double *along, doub
 static double cost_at(const seeker_ray *r, int n, const seeker_tri_opts *o, double x, double y)
 {
     double cost = 0;
+    int whole = whole_range(r, n);
     for (int i = 0; i < n; i++) {
         double along, cross;
         offsets(&r[i], x, y, &along, &cross);
         double sc = sigma_cross(o, &r[i], along);
         cost += (cross / sc) * (cross / sc);
-        if (r[i].has_range) {
+        if (ranged(&r[i], whole)) {
             double e = (along - r[i].range_m) / sigma_range(o, &r[i]);
             cost += e * e;
         }
@@ -146,9 +163,9 @@ seeker_tri_method seeker_tri_solve(const seeker_ray *r, int n, const seeker_tri_
                 best_sin = s;
         }
     out->cross_deg = (float)(asin(fmin(best_sin, 1.0)) * RAD2DEG);
-    int any_range = 0;
+    int any_range = 0, whole = whole_range(r, n);
     for (int i = 0; i < n; i++)
-        any_range |= r[i].has_range;
+        any_range |= ranged(&r[i], whole);
     double min_cross = any_range ? o->min_cross_deg : o->min_cross_bearing_only_deg;
 
     if (n >= 2 && best_sin >= sin(min_cross * DEG2RAD)) {
@@ -174,7 +191,7 @@ seeker_tri_method seeker_tri_solve(const seeker_ray *r, int n, const seeker_tri_
                 offsets(&r[i], x0, y0, &along, &cross);
                 double sc = sigma_cross(o, &r[i], along);
                 add_term(&m, uy, -ux, 1.0 / (sc * sc), uy * r[i].x_m - ux * r[i].y_m);
-                if (r[i].has_range) {
+                if (ranged(&r[i], whole)) {
                     double sr = sigma_range(o, &r[i]);
                     add_term(&m, ux, uy, 1.0 / (sr * sr),
                              ux * r[i].x_m + uy * r[i].y_m + r[i].range_m);
@@ -190,7 +207,7 @@ seeker_tri_method seeker_tri_solve(const seeker_ray *r, int n, const seeker_tri_
     /* Parallel, diverging or single: weighted mean of the range points. */
     double sw = 0, sx = 0, sy = 0;
     for (int i = 0; i < n; i++) {
-        if (!r[i].has_range)
+        if (!ranged(&r[i], whole))
             continue;
         double ux, uy, sr = sigma_range(o, &r[i]);
         unit(&r[i], &ux, &uy);
@@ -210,6 +227,7 @@ int seeker_tri_consistent(const seeker_ray *r, int n, const seeker_tri_opts *o,
 {
     if (fx->method == SEEKER_TRI_NONE)
         return 0;
+    int whole = whole_range(r, n);
     for (int i = 0; i < n; i++) {
         double along, cross;
         offsets(&r[i], fx->x_m, fx->y_m, &along, &cross);
@@ -217,7 +235,7 @@ int seeker_tri_consistent(const seeker_ray *r, int n, const seeker_tri_opts *o,
             return 0;
         if (fabs(cross) > fmax(o->assoc_m, 3.0 * sigma_cross(o, &r[i], along)))
             return 0;
-        if (r[i].has_range &&
+        if (ranged(&r[i], whole) &&
             fabs(along - r[i].range_m) > fmax(o->assoc_m, o->range_gate_frac * r[i].range_m))
             return 0;
     }

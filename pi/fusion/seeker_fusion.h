@@ -166,6 +166,7 @@ typedef struct {
     long ab_seq;       /* sum of the source nodes' message counts at the last filter update */
     int64_t ab_msg_ms; /* primary node's message clock (t_mono_ms or ts_ms) at that update */
     int64_t ab_rx_ms;  /* Pi receive time of that update */
+    int ab_node;       /* primary node index + 1 at that update (another phone's clock differs) */
     seeker_rf rf;      /* range filter, while the track is a single-node mono range point */
     int pv_valid;      /* glide velocity (fusion.predict_ms): from successive filtered */
     float pvx, pvy;    /* positions, so it covers sideways motion of a one-phone track too */
@@ -177,7 +178,37 @@ typedef struct {
     int matched;       /* taken by a cluster this tick */
     seeker_skel skel;  /* smoothed ghost skeleton of the primary contact (seeker_skel.h) */
     seeker_posture posture; /* STAND / CROUCH / DOWN from that skeleton (seeker_posture.h) */
+    /* Handoff (fusion.handoff, SEEKER_HANDOFF_*): */
+    unsigned node_mask; /* nodes (bit = node index) that saw the whole person at the last update */
+    float cxx, cxy, cyy; /* position covariance of the last fix (m^2): long along a mono ray */
+    int rf_node;        /* node index + 1 the range filter's range is measured from, 0 none */
+    float rk[SEEKER_MAX_NODES];      /* per node: fused distance / that node's mono range */
+    int64_t rk_ms[SEEKER_MAX_NODES]; /* when it was last learned (0 never) */
+    float ho_x, ho_y;   /* handoff blend: offset from the new fix, decaying from ho_ms */
+    int64_t ho_ms;
+    long handoffs;      /* node set changes this track lived through (logs, tests) */
 } seeker_fusion_mem;
+
+/* Handoff between phones (an R2-only x-ray person R1 starts to see, or the other way round).
+ * Contacts that show only part of a body (no eyes+ankles and no full torso at visibility 0.5,
+ * and a box that does not look like a whole person) are partial: their size range is that of
+ * the visible part, so triangulation uses them by bearing (seeker_ray.partial), they are left
+ * out of the track's node list (R1 seeing a hand round a corner keeps the person XRAY, placed
+ * on R1's bearing), and the wearer's own partial sightings never start a track: they only
+ * continue a live one whose predicted position is on their bearing. Track identity gates on the
+ * fix's and the track's own covariance (a mono range is +-20 to 30% along its ray), 1 sigma
+ * wider when the node set changes, and a shared phone contact id is the same person within
+ * track_gate_max_m. When the node set changes the filters restart at the new fix and the sent
+ * position glides there from the old one (SEEKER_HANDOFF_TAU_MS) instead of kicking the
+ * velocity. Each node's mono range is rescaled by what fused fixes taught (rk, from messages of
+ * both phones under SEEKER_HANDOFF_FRESH_MS old, fading back to 1), so a person R1 stops seeing
+ * stays near where the fused fix put them instead of jumping by the other phone's range error. */
+#define SEEKER_HANDOFF_TAU_MS 90.0f   /* position blend time constant */
+#define SEEKER_HANDOFF_MS 350         /* blend length */
+#define SEEKER_HANDOFF_MIN_M 0.10f    /* smaller jumps are filtered as usual */
+#define SEEKER_HANDOFF_RK_TAU_MS 4000.0f /* a learned range ratio fades back to 1 */
+#define SEEKER_HANDOFF_FRESH_MS 200   /* ratios are learned only from messages this new */
+#define SEEKER_HANDOFF_BEARING_DEG 20.0f /* bearing-only continuation: at most this far off */
 
 #define SEEKER_FUSION_MEM 32
 
@@ -197,6 +228,8 @@ typedef struct {
     int range_hfov;  /* 1 (init default): box-height ranges rescaled with --hfov's real FOV */
     float person_h;  /* people's height in m for box-height range (0: phone.html's 1.7) */
     int ground_range; /* 1: a node with cam_h also ranges from the feet row (averaged in) */
+    int handoff;     /* 1 (init default): partial contacts, covariance gate and the handoff blend
+                      * (SEEKER_HANDOFF_*); 0 is the old identity code (hud_fusion --no-handoff) */
     int n_tags;    /* room poses of tags other than 0 (hud_fusion --tag-pose) */
     seeker_fusion_tag tags[SEEKER_MAX_TAGS];
     seeker_tri_opts tri; /* triangulation tuning; init copies assoc_m and the fusion.tri_* keys */

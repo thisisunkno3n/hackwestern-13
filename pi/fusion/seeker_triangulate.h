@@ -30,6 +30,10 @@ typedef struct {
     float range_m;
     float conf;         /* detector confidence 0..1; 0 means unknown (treated as 0.5) */
     int node;           /* caller's node index: rays from the same node are never fused */
+    int partial;        /* part of a body (a hand or shoulder round a wall edge): its size range
+                         * is the visible part's, so it is ignored when another ray in the set
+                         * has a whole-body range, and its bearing counts partial_bearing_k
+                         * times less sure */
 } seeker_ray;
 
 typedef struct {
@@ -43,6 +47,7 @@ typedef struct {
     float assoc_m;           /* floor for the range and cross-ray gates (remote.assoc_m) */
     float prior_sigma_m;     /* grouping: a fix this far from a track prior costs 1 (chi-square) */
     float prior_cap;         /* grouping: prior cost cap, so a new person is not shut out */
+    float partial_bearing_k; /* bearing sigma factor for a partial ray (its hip midpoint is a guess) */
 } seeker_tri_opts;
 
 /* Predicted position of an existing track, to break ties between pairings (ghost crossings). */
@@ -78,7 +83,7 @@ float seeker_tri_range_sigma(const seeker_tri_opts *o, float range_m, float conf
 seeker_tri_method seeker_tri_solve(const seeker_ray *r, int n, const seeker_tri_opts *o,
                                    seeker_fix *out);
 /* 1 if fx lies in front of every ray, within max_range_m, and inside each ray's cross-ray and
- * range gates. */
+ * range gates (a partial ray's range gate only when no whole-body ray in the set has a range). */
 int seeker_tri_consistent(const seeker_ray *r, int n, const seeker_tri_opts *o,
                           const seeker_fix *fx);
 /* Groups n rays into clusters (each ray in exactly one, at most one ray per node per cluster).

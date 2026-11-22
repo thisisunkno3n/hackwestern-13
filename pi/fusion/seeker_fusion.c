@@ -42,6 +42,7 @@ void seeker_fusion_init(seeker_fusion *f, const seeker_config *cfg)
     f->pose_smooth = 1;
     f->pose_flip = 1;
     f->range_hfov = 1;
+    f->handoff = 1;
     seeker_tri_defaults(&f->tri);
     f->tri.assoc_m = cfg->assoc_m;
     f->tri.bearing_sigma_deg = cfg->tri_bearing_sigma_deg;
@@ -747,13 +748,18 @@ static void smooth_track(seeker_fusion *f, seeker_fusion_mem *mm,
         return;
     }
     int64_t dt_ms = n->last.t_mono_ms - mm->ab_msg_ms;
-    if (n->last.t_mono_ms <= 0 || dt_ms <= 0 || dt_ms > cfg->drop_ms)
+    int pnode = (int)(n - f->nodes) + 1;
+    if (n->last.t_mono_ms <= 0 || dt_ms <= 0 || dt_ms > cfg->drop_ms ||
+        (f->handoff && mm->ab_node && mm->ab_node != pnode)) /* another phone's clock */
         dt_ms = rx - mm->ab_rx_ms;
     float dt = (float)dt_ms / 1000.0f;
     int was_valid = mm->ab.valid;
     float ox = mm->ab.x, oy = mm->ab.y;
     if (single && cfg->range_smooth && single->range_m > 0) {
         float ux = sinf(single->bearing_deg * DEG2RAD), uy = cosf(single->bearing_deg * DEG2RAD);
+        if (f->handoff && mm->rf.valid && mm->rf_node != single->node + 1)
+            mm->rf.valid = 0; /* its range was from another phone */
+        mm->rf_node = single->node + 1;
         if (!mm->rf.valid && mm->ab.valid) /* was a fused fix: start from where the track is */
             mm->rf = (seeker_rf){ 1, hypotf(mm->ab.x - single->x_m, mm->ab.y - single->y_m), 0 };
         int rf_valid = mm->rf.valid;
@@ -787,6 +793,7 @@ static void smooth_track(seeker_fusion *f, seeker_fusion_mem *mm,
     mm->pv_x = *x;
     mm->pv_y = *y;
     mm->ab_seq = seq;
+    mm->ab_node = pnode;
     mm->ab_msg_ms = n->last.t_mono_ms;
     mm->ab_rx_ms = rx;
 }
@@ -850,22 +857,69 @@ static void join_plus(char *dst, int dstsz, const char *const *parts, int n)
         len += snprintf(dst + len, (size_t)(dstsz - len), "%s%.*s", i ? "+" : "", each, parts[i]);
 }
 
+/* Part of a body (SEEKER_HANDOFF_*): phone.html ranges from eyes to ankles, else the torso,
+ * else the box of the visible landmarks; the last is the visible part's height, not the
+ * person's. Such a contact is partial unless its box still looks like a whole person (tall,
+ * narrow, clear of the frame's sides). Without landmarks there is nothing to tell: whole. */
+static int contact_partial(const seeker_contact *c, int w, int h)
+{
+    if (!c->has_pts)
+        return 0;
+    const float(*p)[3] = c->pts;
+    const float v = 0.5f;
+    int head = p[0][2] > v || p[1][2] > v || p[2][2] > v;
+    int ankle = p[15][2] > v || p[16][2] > v;
+    int torso = p[5][2] > v && p[6][2] > v && p[11][2] > v && p[12][2] > v;
+    if ((head && ankle) || torso)
+        return 0;
+    if (c->has_box && w > 0 && h > 0 && c->box[3] >= 2.2f * c->box[2] && c->box[3] >= 0.3f * (float)h &&
+        c->box[0] > 0.01f * (float)w && c->box[0] + c->box[2] < 0.99f * (float)w)
+        return 0;
+    return 1;
+}
+
+static const char *wearer_id(const seeker_config *cfg)
+{
+    return cfg->wearer_node[0] ? cfg->wearer_node : cfg->view_node;
+}
+
 /* Fills one track's identity fields from a triangulation cluster of contacts (ray index -> node,
- * contact). Returns the member count; nodes[0] is the primary node, then the others. */
-static int place_cluster(const seeker_fusion *f, const seeker_tri_cluster *cl, const int *ray_node,
-                         const int *ray_idx, int64_t now_ms, seeker_track *k,
-                         const seeker_fusion_node **nodes, const seeker_contact **primary_contact)
+ * contact). Returns the member count; nodes[0] is the primary node, then the others. The track's
+ * node list names only the nodes that see the whole person (all of them when none does); mask
+ * gets the same nodes as bits, and wearer_part is set for a lone partial contact of the wearer. */
+static int place_cluster(const seeker_fusion *f, const seeker_tri_cluster *cl, const seeker_ray *rays,
+                         const int *ray_node, const int *ray_idx, int64_t now_ms, seeker_track *k,
+                         const seeker_fusion_node **nodes, const seeker_contact **primary_contact,
+                         unsigned *mask, int *wearer_part)
 {
     const seeker_config *cfg = f->cfg;
-    int primary = cl->member[0]; /* prefer the wearer's view_node so its box drives the brackets */
+    int whole = 0;
+    for (int m = 0; m < cl->n; m++)
+        whole += !rays[cl->member[m]].partial;
+    /* Prefer the wearer's view_node so its box drives the brackets, unless it sees only a part. */
+    int primary = cl->member[0];
+    for (int m = 0; m < cl->n && whole; m++)
+        if (!rays[cl->member[m]].partial) {
+            primary = cl->member[m];
+            break;
+        }
     const char *ids[SEEKER_TRI_MAX_MEMBERS], *labels[SEEKER_TRI_MAX_MEMBERS];
+    int nid = 0;
     k->age_ms = 0;
+    *mask = 0;
+    *wearer_part = 0;
     for (int m = 0; m < cl->n; m++) {
         const seeker_fusion_node *mn = &f->nodes[ray_node[cl->member[m]]];
-        ids[m] = mn->id;
+        int part = whole > 0 && rays[cl->member[m]].partial;
+        if (!part) {
+            ids[nid++] = mn->id;
+            *mask |= 1u << ray_node[cl->member[m]];
+        }
         labels[m] = mn->last.c[ray_idx[cl->member[m]]].id;
-        if (!strcmp(mn->id, cfg->view_node))
+        if (!strcmp(mn->id, cfg->view_node) && !part)
             primary = cl->member[m];
+        if (cl->n == 1 && rays[cl->member[m]].partial && !strcmp(mn->id, wearer_id(cfg)))
+            *wearer_part = 1;
         int age = (int)(now_ms - mn->last_rx_ms);
         if (age > k->age_ms)
             k->age_ms = age;
@@ -881,7 +935,7 @@ static int place_cluster(const seeker_fusion *f, const seeker_tri_cluster *cl, c
     k->node_bearing_deg = c->bearing_deg;
     k->has_node_box = c->has_box;
     memcpy(k->node_box, c->box, sizeof k->node_box);
-    join_plus(k->nodes, sizeof k->nodes, ids, cl->n);
+    join_plus(k->nodes, sizeof k->nodes, ids, nid);
     join_plus(k->label, sizeof k->label, labels, cl->n);
     switch (cl->fix.method) {
     case SEEKER_TRI_INTERSECT: /* wider crossing angle, better fix */
@@ -899,6 +953,178 @@ static int place_cluster(const seeker_fusion *f, const seeker_tri_cluster *cl, c
         if (cl->member[m] != primary)
             nodes[nn++] = &f->nodes[ray_node[cl->member[m]]];
     return nn;
+}
+
+/* ---- handoff between phones (SEEKER_HANDOFF_*) ---- */
+
+static float conf_k(float conf)
+{
+    float c = conf > 0 ? conf : 0.5f;
+    return c < 0.1f ? 0.1f : c > 1.0f ? 1.0f : c;
+}
+
+static float bearing_sigma_m(const seeker_fusion *f, const seeker_ray *r, float dist)
+{
+    float k = r->partial && f->tri.partial_bearing_k > 1.0f ? f->tri.partial_bearing_k : 1.0f;
+    return fmaxf(dist, 0.5f) * f->tri.bearing_sigma_deg * DEG2RAD * k / conf_k(r->conf);
+}
+
+/* Covariance of a fix: a lone phone's range point is long along its ray (the size range) and
+ * narrow across it (the bearing); a fused fix is round. The wearer's partial sighting placed on
+ * its bearing keeps the track's own (its distance is the track's). */
+static void fix_cov(const seeker_fusion *f, const seeker_fix *fx, const seeker_ray *single, int wpart,
+                    float *cxx, float *cxy, float *cyy)
+{
+    if (wpart)
+        return;
+    if (single && single->has_range) {
+        float b = single->bearing_deg * DEG2RAD, ux = sinf(b), uy = cosf(b);
+        float sa = seeker_tri_range_sigma(&f->tri, single->range_m, single->conf);
+        float sc = bearing_sigma_m(f, single, single->range_m);
+        sa *= sa;
+        sc *= sc;
+        *cxx = sa * ux * ux + sc * uy * uy;
+        *cxy = (sa - sc) * ux * uy;
+        *cyy = sa * uy * uy + sc * ux * ux;
+        return;
+    }
+    *cxx = *cyy = fx->sigma_m * fx->sigma_m;
+    *cxy = 0;
+}
+
+/* Does any '+'-separated contact id of a also appear in b? */
+static int labels_share(const char *a, const char *b)
+{
+    for (const char *p = a; *p;) {
+        const char *e = strchr(p, '+');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        for (const char *q = b; n && *q;) {
+            const char *qe = strchr(q, '+');
+            size_t qn = qe ? (size_t)(qe - q) : strlen(q);
+            if (qn == n && !strncmp(p, q, n))
+                return 1;
+            if (!qe)
+                break;
+            q = qe + 1;
+        }
+        if (!e)
+            break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+/* Gate and cost of cluster cl for live track m predicted at pr. A lone partial sighting of the
+ * wearer goes by bearing: the track's predicted spot must sit on its ray. Anything else with a
+ * position: Mahalanobis distance with the fix's and the track's covariance plus track_sigma_m
+ * of motion, within track_gate_sigmas (one more when the node set changes) and
+ * track_gate_max_m; a shared phone contact id is enough within track_gate_max_m. The old
+ * round gate still lets a pair through. */
+static void handoff_gate(const seeker_fusion *f, const seeker_fusion_mem *m, const seeker_tri_prior *pr,
+                         const seeker_tri_cluster *cl, const seeker_ray *rays, unsigned mask, int wpart,
+                         const char *label, unsigned char *tok, double *cost)
+{
+    const seeker_config *cfg = f->cfg;
+    float ts2 = cfg->track_sigma_m * cfg->track_sigma_m;
+    if (wpart) {
+        const seeker_ray *ry = &rays[cl->member[0]];
+        float b = ry->bearing_deg * DEG2RAD, ux = sinf(b), uy = cosf(b);
+        float vx = pr->x_m - ry->x_m, vy = pr->y_m - ry->y_m;
+        float along = vx * ux + vy * uy, cross = vx * uy - vy * ux;
+        if (along < 0.3f || fabsf(atan2f(cross, along)) * RAD2DEG > SEEKER_HANDOFF_BEARING_DEG)
+            return;
+        float sb = bearing_sigma_m(f, ry, along);
+        float tn = m->cxx * uy * uy - 2.0f * m->cxy * ux * uy + m->cyy * ux * ux;
+        float s2 = sb * sb + tn + ts2, g = cfg->track_gate_sigmas + 1.0f;
+        *tok = cross * cross <= g * g * s2 && fabsf(cross) <= cfg->track_gate_max_m;
+        *cost = cross * cross / s2;
+        return;
+    }
+    const seeker_fix *fx = &cl->fix;
+    if (fx->method == SEEKER_TRI_NONE)
+        return;
+    float dx = fx->x_m - pr->x_m, dy = fx->y_m - pr->y_m, d = hypotf(dx, dy);
+    float s2 = ts2 + fx->sigma_m * fx->sigma_m;
+    float gate = fminf(cfg->track_gate_sigmas * sqrtf(s2 > 1e-6f ? s2 : 1e-6f), cfg->track_gate_max_m);
+    if (gate < cfg->smooth_gate_m)
+        gate = cfg->smooth_gate_m;
+    float fxx, fxy, fyy;
+    fix_cov(f, fx, fx->method == SEEKER_TRI_SINGLE ? &rays[cl->member[0]] : NULL, 0, &fxx, &fxy, &fyy);
+    float a = fxx + m->cxx + ts2, bb = fxy + m->cxy, c = fyy + m->cyy + ts2;
+    float det = a * c - bb * bb;
+    float m2 = det > 1e-9f ? (c * dx * dx - 2.0f * bb * dx * dy + a * dy * dy) / det
+                           : d * d / (s2 > 1e-6f ? s2 : 1e-6f);
+    float g = cfg->track_gate_sigmas + (mask != m->node_mask ? 1.0f : 0.0f);
+    int shared = labels_share(m->label, label);
+    *tok = d <= gate || (d <= cfg->track_gate_max_m && (m2 <= g * g || shared));
+    *cost = m2 * (shared ? 0.5 : 1.0);
+}
+
+/* The wearer's partial sighting continuing track m: on its bearing, at the track's distance. */
+static void bearing_fix(const seeker_fusion *f, const seeker_tri_prior *pr, const seeker_ray *ry, seeker_fix *fx)
+{
+    float b = ry->bearing_deg * DEG2RAD, ux = sinf(b), uy = cosf(b);
+    float along = (pr->x_m - ry->x_m) * ux + (pr->y_m - ry->y_m) * uy;
+    fx->method = SEEKER_TRI_PARALLEL; /* a position, filtered like a fused one */
+    fx->x_m = ry->x_m + along * ux;
+    fx->y_m = ry->y_m + along * uy;
+    fx->sigma_m = bearing_sigma_m(f, ry, along);
+    fx->cost = 0;
+}
+
+/* Node n's learned range ratio now: faded toward 1 since it was learned. */
+static float range_ratio(const seeker_fusion_mem *mm, int n, int64_t now_ms)
+{
+    if (!mm->rk_ms[n])
+        return 1.0f;
+    float e = expf(-(float)(now_ms - mm->rk_ms[n]) / SEEKER_HANDOFF_RK_TAU_MS);
+    return 1.0f + (mm->rk[n] - 1.0f) * e;
+}
+
+/* While two phones fix the person, each one's distance to the fix over its own size range. */
+static void learn_range_ratio(const seeker_fusion *f, seeker_fusion_mem *mm, const seeker_tri_cluster *cl,
+                              const seeker_ray *rays, int64_t now_ms)
+{
+    for (int i = 0; i < cl->n; i++)
+        if (now_ms - f->nodes[rays[cl->member[i]].node].last_rx_ms > SEEKER_HANDOFF_FRESH_MS)
+            return; /* one phone's view is older: the person moved in between */
+    for (int i = 0; i < cl->n; i++) {
+        const seeker_ray *r = &rays[cl->member[i]];
+        if (!r->has_range || r->partial || r->range_m < 0.3f || r->node < 0 || r->node >= SEEKER_MAX_NODES)
+            continue;
+        float q = clampf(hypotf(cl->fix.x_m - r->x_m, cl->fix.y_m - r->y_m) / r->range_m, 0.5f, 2.0f);
+        int n = r->node;
+        float k = range_ratio(mm, n, now_ms);
+        mm->rk[n] = mm->rk_ms[n] ? k + 0.2f * (q - k) : q; /* the first fused fix is the best yet */
+        mm->rk_ms[n] = now_ms;
+    }
+}
+
+/* The track's node set changes (another phone takes over or joins) and the new fix is more than
+ * SEEKER_HANDOFF_MIN_M from where the track was drawn: the filters move to the new fix and keep
+ * their velocity (a change of measurement is not motion: no velocity kick, no slow slide, no lag
+ * on someone still walking), and (hx, hy) gets the old position for the glide. Returns 1 then. */
+static int handoff_start(const seeker_fusion *f, seeker_fusion_mem *mm, unsigned mask, float x, float y,
+                         int64_t now_ms, float *hx, float *hy)
+{
+    if (!mm->node_mask || mask == mm->node_mask || !mm->ab.valid || !mm->has_pos ||
+        now_ms - mm->seen_ms > f->cfg->smooth_reset_ms)
+        return 0;
+    predict(f, mm, now_ms, hx, hy);
+    if (mm->ho_ms && now_ms - mm->ho_ms < SEEKER_HANDOFF_MS) {
+        float e = expf(-(float)(now_ms - mm->ho_ms) / SEEKER_HANDOFF_TAU_MS);
+        *hx += mm->ho_x * e;
+        *hy += mm->ho_y * e;
+    }
+    if (hypotf(x - *hx, y - *hy) < SEEKER_HANDOFF_MIN_M)
+        return 0;
+    float h = clampf((float)(now_ms - mm->ab_rx_ms) / 1000.0f, 0, (float)f->cfg->smooth_reset_ms / 1000.0f);
+    mm->ab.x = x - mm->ab.vx * h; /* so the filter's prediction for now is the new fix */
+    mm->ab.y = y - mm->ab.vy * h;
+    mm->rf.valid = 0; /* restarts at the new fix's distance from its phone */
+    mm->pv_x = mm->ab.x;
+    mm->pv_y = mm->ab.y;
+    return 1;
 }
 
 void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
@@ -965,6 +1191,7 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
             r->range_m = c->range_m;
             r->conf = c->conf;
             r->node = i;
+            r->partial = f->handoff && contact_partial(c, n->image_w, n->image_h);
             ray_node[nr] = i;
             ray_idx[nr++] = k;
         }
@@ -987,11 +1214,12 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
     int ncl = seeker_tri_group_prior(rays, nr, &f->tri, pri, nlive, cls, MAX_RAYS);
     int nout = ncl < SEEKER_MAX_TRACKS ? ncl : SEEKER_MAX_TRACKS;
     const seeker_fusion_node *mnodes[SEEKER_MAX_TRACKS][SEEKER_TRI_MAX_MEMBERS];
-    int nms[SEEKER_MAX_TRACKS];
+    int nms[SEEKER_MAX_TRACKS], wpart[SEEKER_MAX_TRACKS];
+    unsigned cmask[SEEKER_MAX_TRACKS];
     const seeker_contact *pcon[SEEKER_MAX_TRACKS];
     for (int a = 0; a < nout; a++)
-        nms[a] = place_cluster(f, &cls[a], ray_node, ray_idx, now_ms, &out->tracks[a], mnodes[a],
-                               &pcon[a]);
+        nms[a] = place_cluster(f, &cls[a], rays, ray_node, ray_idx, now_ms, &out->tracks[a],
+                               mnodes[a], &pcon[a], &cmask[a], &wpart[a]);
     out->n = nout;
 
     /* Track identity: fixes to live tracks by predicted position, minimum total cost. */
@@ -1006,6 +1234,11 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
             int at = r * nout + a;
             tok[at] = 0;
             tcost[at] = 0;
+            if (f->handoff) {
+                handoff_gate(f, &f->mem[live[r]], &pri[r], &cls[a], rays, cmask[a], wpart[a],
+                             out->tracks[a].label, &tok[at], &tcost[at]);
+                continue;
+            }
             if (fx->method == SEEKER_TRI_NONE)
                 continue;
             float d = hypotf(fx->x_m - pri[r].x_m, fx->y_m - pri[r].y_m);
@@ -1022,13 +1255,20 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
             if (row_col[r] >= 0) {
                 cl_mem[row_col[r]] = live[r];
                 f->mem[live[r]].matched = 1;
+                if (wpart[row_col[r]]) /* on the wearer's bearing, at the track's distance */
+                    bearing_fix(f, &pri[r], &rays[cls[row_col[r]].member[0]], &cls[row_col[r]].fix);
             }
     for (int a = 0; a < nout; a++)
         if (cl_mem[a] >= 0)
             relabel(f, &f->mem[cl_mem[a]], out->tracks[a].label);
+    int drop[SEEKER_MAX_TRACKS] = { 0 };
     for (int a = 0; a < nout; a++) {
         if (cl_mem[a] >= 0)
             continue;
+        if (wpart[a]) { /* the wearer sees part of someone no track is near: no new person */
+            drop[a] = 1;
+            continue;
+        }
         seeker_fusion_mem *m = track_for_label(f, out->tracks[a].label, now_ms);
         if (m) {
             m->matched = 1;
@@ -1049,8 +1289,35 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
         int has_room = cls[a].fix.method != SEEKER_TRI_NONE;
         const seeker_ray *single =
             cls[a].fix.method == SEEKER_TRI_SINGLE ? &rays[cls[a].member[0]] : NULL;
+        seeker_ray scaled;
+        float hx = 0, hy = 0;
+        int ho = 0;
+        if (f->handoff && has_room) {
+            if (cls[a].fix.method == SEEKER_TRI_INTERSECT)
+                learn_range_ratio(f, mm, &cls[a], rays, now_ms);
+            if (single && single->has_range && mm->rk_ms[single->node] > 0) {
+                scaled = *single;
+                scaled.range_m *= range_ratio(mm, single->node, now_ms);
+                seeker_node_to_room(scaled.x_m, scaled.y_m, 0, scaled.bearing_deg, scaled.range_m, &x, &y);
+                single = &scaled;
+            }
+            ho = handoff_start(f, mm, cmask[a], x, y, now_ms, &hx, &hy);
+        }
         if (has_room && cfg->smooth)
             smooth_track(f, mm, mnodes[a], nm, single, now_ms, &x, &y);
+        if (ho) { /* glide from where the person was drawn to the new fix */
+            mm->ho_x = hx - x;
+            mm->ho_y = hy - y;
+            mm->ho_ms = now_ms;
+            mm->handoffs++;
+            if (f->debug)
+                seeker_log("track %d handoff to %s: %.2f m from where it was, gliding over %d ms",
+                           mm->id, k->nodes, hypotf(mm->ho_x, mm->ho_y), SEEKER_HANDOFF_MS);
+        }
+        if (f->handoff && has_room) {
+            fix_cov(f, &cls[a].fix, single, wpart[a], &mm->cxx, &mm->cxy, &mm->cyy);
+            mm->node_mask = cmask[a];
+        }
         mm->has_pos = has_room;
         mm->px = x;
         mm->py = y;
@@ -1064,6 +1331,11 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
                              (float)cfg->predict_ms / 1000.0f);
             x += mm->pvx * h;
             y += mm->pvy * h;
+        }
+        if (has_room && mm->ho_ms && now_ms - mm->ho_ms < SEEKER_HANDOFF_MS) {
+            float e = expf(-(float)(now_ms - mm->ho_ms) / SEEKER_HANDOFF_TAU_MS);
+            x += mm->ho_x * e;
+            y += mm->ho_y * e;
         }
         if (has_room) {
             k->has_room = 1;
@@ -1114,4 +1386,12 @@ void seeker_fusion_tick(seeker_fusion *f, int64_t now_ms, seeker_tracks *out)
             debug_track(f, k, &cls[a].fix, single);
         }
     }
+    int kept = 0;
+    for (int a = 0; a < nout; a++)
+        if (!drop[a]) {
+            if (kept != a)
+                out->tracks[kept] = out->tracks[a];
+            kept++;
+        }
+    out->n = kept;
 }
