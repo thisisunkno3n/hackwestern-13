@@ -29,7 +29,7 @@ tag 0, else tag 7, [below](#r2-on-tag-0-and-tag-7-r2_modetag)), `WEARER_POSE="0,
 walls); the simulator's `config/seeker.eagleeye.json` (with its `W` node) is for
 `eagleeye_test.sh` only.
 
-`seeker_bridge.py` runs Daniel's `ws_ingest.py` unchanged, plus four things:
+`seeker_bridge.py` runs Daniel's `ws_ingest.py` unchanged, plus these things:
 
 1. It sends `video_ctrl` to the helmet phone, so video streams even if the URL lost `&video=1`.
 2. It connects to `hud_display` at once, so the HUD can tell "no bridge" from "phone not
@@ -38,6 +38,16 @@ walls); the simulator's `config/seeker.eagleeye.json` (with its `W` node) is for
 4. It forwards the phone's `pose: null` to `hud_fusion`. Plain `ws_ingest.py` re-sends the last
    pose instead, so the HUD would say `POSE LIVE` while the tag is out of view.
    `--keep-ingest-pose` (in `BRIDGE_ARGS`) turns this off.
+5. It closes dead phone links and logs every close with a reason (`R2 closed: <reason>`). A
+   phone that drops off the hotspot or locks often leaves no FIN or RST on the Pi; plain
+   `ws_ingest.py` then keeps that socket open forever and logs nothing, and the phone
+   reconnects next to it. The bridge pings a quiet link every second, closes it after 15 s
+   with no data at all (`--idle-s`; hotspot RTT spikes are under 1 s), and closes an old link
+   as soon as a newer connection from the same node is up and the old one has been silent 3 s.
+6. It pins `PINS` poses (`--pin R2=x,y,yaw`, what `run-live.sh` passes in pin mode): R2's
+   messages reach `hud_fusion` with the pin even when its page reconnects with `pose: null`.
+7. It asks a phone other than the wearer that sends video to stop (`video_ctrl` with
+   `stream_video: false`), so R2 does not spend the hotspot uplink on frames that are dropped.
 
 The same fixes are proposed to Daniel in [DANIEL-VIDEO-PATCH.md](DANIEL-VIDEO-PATCH.md).
 
@@ -136,7 +146,7 @@ are a real move and are taken (about 200 ms). `--debug` logs each ignored jump;
 [seeker_bridge] video: connected to hud_display at 127.0.0.1:47106
 [hud_display] video: relay connected from 127.0.0.1:<port>
 [hud_display] video: no-frames, HUD says "NO VIDEO: PHONE NOT SENDING"     (no phone yet)
-[seeker_bridge] phone R1 connected (view node: its video goes to the HUD)
+[seeker_bridge] phone R1 connected from 172.20.10.2:52114 (view node: its video goes to the HUD)
 [seeker_bridge] video: asked R1 to stream video (video_ctrl, 15 fps)
 [seeker_bridge] video: first frame from R1
 [hud_display] video: first frame from 127.0.0.1:<port>: R1 640x480 seq 0, ...
@@ -194,9 +204,18 @@ means the wrong phone's video reached the HUD (only R1's is shown; check `WEARER
 | --- | --- |
 | `video: hud_display not listening on 127.0.0.1:47106 yet (...)` | Start `hud_display` (run-live does this first); retried every second |
 | `video: link to hud_display lost (...), reconnecting` | `hud_display` restarted; video comes back by itself |
-| `phone R1 connected (view node ...)` / `video: asked R1 to stream video` | Helmet page is up; `video_ctrl` sent |
+| `phone R1 connected from <ip:port> (view node ...)` / `video: asked R1 to stream video` | Helmet page is up; `video_ctrl` sent |
+| `R2 closed: no data from the phone for 15 s, pings unanswered (...)` | R2 left the hotspot, locked, or Safari went to the background without closing the socket. The page reconnects by itself once it runs again |
+| `R2 closed: replaced by a newer R2 connection from ...` | R2 reconnected (Wi-Fi blip, reload) while its old socket was still open on the Pi; the old one is closed |
+| `R2 closed: the phone closed the WebSocket (close frame, code 1001)` | The page closed it: reload, navigation, or Safari going to the background |
+| `R2 closed: the phone closed the TCP connection without a WebSocket close frame (...)` | Tab killed, or the phone dropped the connection |
+| `R2 closed: connection reset (ECONNRESET) ...` / `send to the phone failed: ...` | The network or the phone reset the link |
+| `R2 closed: bridge error in ws_ingest: ...` | A bug on the Pi side; send the line to Felix |
+| `WARNING two live connections say they are R2` | Two phones were opened with `?node=R2`; both are kept |
+| `pose R2: pinned on the Pi at x,y,yaw (--pin); the phone sent null, ignored` | Pin mode: R2's URL lost `&pose=` (or sends another pose); the pin still holds |
+| `status: R2 ..., no data for N s` | R2 is quiet right now; over 15 s the link is closed |
 | `WARNING R1 is connected but sends no video` | Reload R1 with `&video=1`. If that does not help, its `phone.html` is older than `24686f3` (no video capture) |
-| `R2 sends video but only R1 (--view-node) goes to the HUD` | Video from the still phone is dropped by design; only the wearer's video is drawn |
+| `R2 sends video but only R1 (--view-node) goes to the HUD; dropped, asking R2 to stop (video_ctrl stream_video false)` | R2's page was opened with `&video=1`. Its video is dropped by design (only the wearer's is drawn) and the bridge turns it off; `still sends video after a stop request` means its `phone.html` ignores `video_ctrl` |
 | `[ws_ingest] node R1 connected pose=None` | Normal with `?tag=1` until the phone sees the tag (also `R2` in `R2_MODE=tag` or `tag7`, until it sees its tag). For a pinned `R2` it means the URL lost the `&pose=...` part (the pin on the Pi still holds) |
 | `pose R1: live 0.60,-2.00,-15.0` | The helmet phone sees the tag again (logged once per change) |
 | `pose R1: null (tag out of view?); hud_fusion holds ...` | The helmet phone lost the tag; the HUD says `POSE HELD` |

@@ -3,6 +3,7 @@
 and reconnect of the video link, video_ctrl to the view node only, and the unchanged fallback.
 Run: python3 tests/test_seeker_bridge.py"""
 import os
+import select
 import socket
 import struct
 import sys
@@ -43,6 +44,18 @@ def recv_exact(c, n):
             raise ConnectionError("closed")
         b += d
     return b
+
+
+def ws_ingest_path():
+    """$WS_INGEST, else remote/ws_ingest.py of this repo (pi/tests -> ../../remote) or of the
+    Pi's checkout (~/seeker/drafts/pi-lane/tests -> ~/seeker/remote)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.environ.get("WS_INGEST"),
+              os.path.join(here, "..", "..", "remote", "ws_ingest.py"),
+              os.path.join(here, "..", "..", "..", "remote", "ws_ingest.py")):
+        if p and os.path.isfile(p):
+            return p
+    return None
 
 
 def wait_for(pred, secs=5.0):
@@ -129,11 +142,11 @@ class TestInstall(unittest.TestCase):
             mod.ws_recv(c)
         self.assertEqual(c.out.count(b"video_ctrl"), 1)
         self.assertIn(b'"stream_video": true', c.out)
-        st = phones.conns[id(c)]
+        st = phones.conns[c]
         self.assertEqual((st["node"], st["msgs"], st["frames"]), ("R1", 1, 1))
         with self.assertRaises(ConnectionError):
             mod.ws_recv(c)
-        self.assertNotIn(id(c), phones.conns)
+        self.assertNotIn(c, phones.conns)
 
     def test_no_ctrl_for_other_nodes_or_when_off(self):
         hello = (0x80, 0x1, b'{"role":"sensor","node_id":"R2"}')
@@ -173,9 +186,9 @@ class TestInstall(unittest.TestCase):
         for a in (0.5, 0.6, 0.7):
             pong(a)
         self.assertNotIn(b"stream_video", c.out)  # at most one drain per DRAIN_GAP_S
-        self.assertEqual(phones.conns[id(c)]["drains"], 1)
+        self.assertEqual(phones.conns[c]["drains"], 1)
         phones.drain = False
-        phones.conns[id(c)]["drain_t"] = -1e9
+        phones.conns[c]["drain_t"] = -1e9
         for a in (0.5, 0.6, 0.7):
             pong(a)
         self.assertNotIn(b"stream_video", c.out)  # --no-drain
@@ -191,7 +204,7 @@ class TestInstall(unittest.TestCase):
         self.assertTrue(payload.startswith(sb.PING_MAGIC))
         phones.pong(c, payload)
         phones.pong(c, b"junk")  # not ours: ignored
-        st = phones.conns[id(c)]
+        st = phones.conns[c]
         self.assertEqual(len(st["rtt"]), 1)
         self.assertTrue(0 <= st["rtt"][0] < 1000)
         lines = []
@@ -309,11 +322,9 @@ class TestPoseNull(unittest.TestCase):
         self.assertRegex(text, r"pose null \d+ s \(held at 0.60,-2.00,-15.0\)")
 
     def test_against_daniels_ws_ingest(self):
-        path = os.environ.get("WS_INGEST") or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "hackwestern-13",
-            "remote", "ws_ingest.py")
-        if not os.path.isfile(path):
-            self.skipTest("no ws_ingest.py at %s (set WS_INGEST)" % path)
+        path = ws_ingest_path()
+        if path is None:
+            self.skipTest("no ws_ingest.py (set WS_INGEST)")
         mod = sb.load(path)
         frames = iter([LIVE, NULL, LIVE])
 
@@ -331,6 +342,327 @@ class TestPoseNull(unittest.TestCase):
         self.assertEqual(poses[1], None)
         self.assertEqual(poses[0], poses[2])
         self.assertEqual(poses[0]["x_m"], 0.6)
+
+
+HELLO_R2 = b'{"role":"sensor","node_id":"R2","pose":null}'
+DET_R2 = b'{"type":"phone_detections","v":2,"node_id":"R2","pose":null,"width":640,' \
+         b'"height":480,"hfov_deg":66,"contacts":[{"cls":"person","conf":0.9,"bearing_deg":5.0,' \
+         b'"range_m":2.1,"box":[1,2,3,4]}]}'
+
+
+def ws_client_frame(op, data):
+    mask = os.urandom(4)
+    n = len(data)
+    head = bytes([0x80 | op])
+    if n < 126:
+        head += bytes([0x80 | n])
+    elif n < 65536:
+        head += bytes([0x80 | 126]) + struct.pack(">H", n)
+    else:
+        head += bytes([0x80 | 127]) + struct.pack(">Q", n)
+    return head + mask + bytes(b ^ mask[i & 3] for i, b in enumerate(data))
+
+
+class Phone:
+    """A phone.html stand-in on a real socket: masked frames out, server frames parsed, pings
+    answered (after pong_delay_s, like a hotspot RTT spike) only while pump() runs."""
+
+    def __init__(self, port, tls=False):
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        if tls:
+            import ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            s = ctx.wrap_socket(s, server_hostname="127.0.0.1")
+        s.sendall(b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                  b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            d = s.recv(1024)
+            if not d:
+                raise ConnectionError("handshake closed")
+            resp += d
+        assert b" 101 " in resp.split(b"\r\n", 1)[0], resp
+        self.s, self.buf, self.frames, self.eof = s, resp.split(b"\r\n\r\n", 1)[1], [], False
+        self.pongs = []
+
+    def send(self, op, data):
+        self.s.sendall(ws_client_frame(op, data))
+
+    def _read(self, wait):
+        pend = getattr(self.s, "pending", None)
+        if not (pend and pend()) and not select.select([self.s], [], [], wait)[0]:
+            return
+        try:
+            d = self.s.recv(65536)
+        except (ConnectionError, OSError):
+            d = b""
+        if not d:
+            self.eof = True
+            return
+        self.buf += d
+        while len(self.buf) >= 2:
+            op, n, off = self.buf[0] & 0x0F, self.buf[1] & 0x7F, 2
+            if n == 126:
+                if len(self.buf) < 4:
+                    break
+                n, off = struct.unpack(">H", self.buf[2:4])[0], 4
+            if len(self.buf) < off + n:
+                break
+            data, self.buf = self.buf[off:off + n], self.buf[off + n:]
+            self.frames.append((op, data))
+            if op == 0x9:
+                self.pongs.append(data)
+
+    def pump(self, secs, pong_delay_s=0.0, det_every_s=None):
+        """Reads for secs; answers pings pong_delay_s after they came; sends DET_R2 every
+        det_every_s if set. Returns False once the bridge closed the socket."""
+        end = time.monotonic() + secs
+        due, next_det = [], time.monotonic()
+        while time.monotonic() < end and not self.eof:
+            self._read(0.02)
+            now = time.monotonic()
+            due += [(now + pong_delay_s, p) for p in self.pongs]
+            self.pongs = []
+            try:
+                for t, p in [x for x in due if x[0] <= now]:
+                    self.send(0xA, p)
+                due = [x for x in due if x[0] > now]
+                if det_every_s and now >= next_det:
+                    next_det = now + det_every_s
+                    self.send(0x1, DET_R2)
+            except OSError:
+                self.eof = True
+        return not self.eof
+
+    def texts(self):
+        return [json.loads(d.decode()) for op, d in self.frames if op == 0x1]
+
+    def close(self):
+        try:
+            self.s.close()
+        except OSError:
+            pass
+
+
+class TestLiveLink(unittest.TestCase):
+    """The real bridge (scripts/seeker_bridge.py running remote/ws_ingest.py) on real sockets:
+    the R2 disconnects from the live run's bridge.log."""
+
+    def start(self, *extra, tls=False):
+        path = ws_ingest_path()
+        if path is None:
+            self.skipTest("no ws_ingest.py (set WS_INGEST)")
+        import subprocess
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.port = free_port()
+        self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp.bind(("127.0.0.1", 0))
+        self.udp.settimeout(3)
+        self.logf = os.path.join(self.tmp, "bridge.log")
+        args = [sys.executable, "-u", os.path.join(os.path.dirname(sb.__file__), "seeker_bridge.py"),
+                "--ws-ingest", path, "--port", str(self.port), "--fusion", "127.0.0.1",
+                "--fusion-port", str(self.udp.getsockname()[1]), "--video-port", str(free_port()),
+                "--view-node", "R1", "--status-s", "1"] + list(extra)
+        if tls:
+            import shutil
+            if not shutil.which("openssl"):
+                self.skipTest("no openssl to make a test certificate")
+            cert, key = os.path.join(self.tmp, "c.pem"), os.path.join(self.tmp, "k.pem")
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days",
+                            "1", "-subj", "/CN=127.0.0.1", "-keyout", key, "-out", cert],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            args += ["--tls-cert", cert, "--tls-key", key]
+        self.out = open(self.logf, "w")
+        self.proc = subprocess.Popen(args, stdout=self.out, stderr=subprocess.STDOUT)
+        self.addCleanup(self.stop)
+        self.assertTrue(wait_for(lambda: "phones ->" in self.log(), 10), self.log())
+        self.phones = []
+
+    def stop(self):
+        for p in getattr(self, "phones", []):
+            p.close()
+        self.proc.kill()
+        self.proc.wait()
+        self.out.close()
+        self.udp.close()
+
+    def log(self):
+        with open(self.logf) as f:
+            return f.read()
+
+    def phone(self, tls=False):
+        p = Phone(self.port, tls)
+        self.phones.append(p)
+        return p
+
+    def closes(self, node="R2"):
+        return [ln for ln in self.log().splitlines() if "] %s closed: " % node in ln]
+
+    def half_open(self, tls):
+        self.start("--idle-s", "2", tls=tls)
+        p = self.phone(tls)
+        p.send(0x1, HELLO_R2)
+        p.pump(0.5, det_every_s=0.1)
+        # The phone is gone (hotspot drop, phone locked) but no FIN or RST reaches the Pi.
+        self.assertEqual(self.closes(), [])
+        time.sleep(3.5)
+        self.assertTrue(wait_for(lambda: self.closes(), 3), self.log())
+        self.assertIn("no data from the phone for 2 s", self.closes()[0])
+        self.assertIn("from 127.0.0.1:", self.closes()[0])
+        self.assertFalse(p.pump(1.0))  # the bridge really closed the socket
+        self.assertEqual(len(self.closes()), 1)
+
+    def test_half_open_phone_is_closed_and_logged(self):
+        self.half_open(False)
+
+    def test_half_open_phone_is_closed_and_logged_tls(self):
+        self.half_open(True)
+
+    def test_reconnect_replaces_the_silent_old_link(self):
+        self.start("--idle-s", "60")
+        old = self.phone()
+        old.send(0x1, HELLO_R2)
+        old.pump(0.3, det_every_s=0.1)
+        new = self.phone()  # Safari reconnects while the old socket is still open on the Pi
+        new.send(0x1, HELLO_R2)
+        self.assertTrue(new.pump(5.0, det_every_s=0.1))
+        self.assertEqual(len(self.closes()), 1, self.log())
+        self.assertIn("replaced by a newer R2 connection from 127.0.0.1:", self.closes()[0])
+        self.assertFalse(old.pump(0.5))
+        self.assertTrue(new.pump(1.5, det_every_s=0.1))
+        self.assertEqual(len(self.closes()), 1)
+        self.assertEqual(self.log().count("phone R2 connected from 127.0.0.1:"), 2)
+
+    def test_hotspot_rtt_spikes_do_not_close_or_pause_r2(self):
+        self.start("--idle-s", "3")
+        p = self.phone()
+        p.send(0x1, HELLO_R2)
+        # No detections, only pongs that come back 700 ms late (the live run saw ~680 ms):
+        # over DRAIN_RTT_MS every time, and the only data that keeps the link alive.
+        self.assertTrue(p.pump(7.0, pong_delay_s=0.7))
+        self.assertEqual(self.closes(), [], self.log())
+        self.assertEqual([m for m in p.texts() if m.get("type") == "video_ctrl"], [])
+        self.assertRegex(self.log(), r"status: R2 up \d+ s, .*ws rtt p50 [7-9]\d\d")
+        self.assertNotIn("uplink backlog", self.log())
+
+    def test_pin_survives_null_pose_and_stray_video_is_stopped(self):
+        self.start("--pin", "R2=-1.5,-2,90")
+        p = self.phone()
+        p.send(0x1, HELLO_R2)
+        p.send(0x1, DET_R2)
+        got = json.loads(self.udp.recv(9000).decode())
+        self.assertEqual(got["node_id"], "R2")
+        self.assertEqual(got["pose"], {"x_m": -1.5, "y_m": -2.0, "yaw_deg": 90.0})
+        hdr = HDR.pack(b"SKV2", 2, 0, 0, b"R2".ljust(8, b"\0"), 1, 32, 24, 0, 4)
+        p.send(0x2, hdr + b"abcd")
+        p.pump(1.0, det_every_s=0.2)
+        ctrl = [m for m in p.texts() if m.get("type") == "video_ctrl"]
+        self.assertEqual(len(ctrl), 1, p.texts())
+        self.assertIs(ctrl[0]["stream_video"], False)
+        p.send(0x2, hdr + b"abcd")  # within OTHER_VIDEO_S: not asked again
+        p.pump(0.5)
+        self.assertEqual(len([m for m in p.texts() if m.get("type") == "video_ctrl"]), 1)
+        text = self.log()
+        self.assertIn("pose R2: pinned on the Pi at -1.50,-2.00,90.0 (--pin); the phone sent null",
+                      text)
+        self.assertIn("asking R2 to stop (video_ctrl stream_video false)", text)
+        self.assertTrue(wait_for(lambda: "pose pinned -1.50,-2.00,90.0 (on the Pi)" in self.log()))
+
+    def test_close_frame_and_fin_reasons(self):
+        self.start()
+        p = self.phone()
+        p.send(0x1, HELLO_R2)
+        p.send(0x8, struct.pack(">H", 1001))
+        self.assertTrue(wait_for(lambda: self.closes()), self.log())
+        self.assertIn("the phone closed the WebSocket (close frame, code 1001)", self.closes()[0])
+        q = self.phone()
+        q.send(0x1, HELLO_R2)
+        q.pump(0.3)
+        q.close()
+        self.assertTrue(wait_for(lambda: len(self.closes()) == 2), self.log())
+        self.assertIn("without a WebSocket close frame", self.closes()[1])
+
+
+class TestClosePaths(unittest.TestCase):
+    def capture(self):
+        lines = []
+        orig = sb.log
+        sb.log = lambda *a: lines.append(" ".join(str(x) for x in a))
+        self.addCleanup(setattr, sb, "log", orig)
+        return lines
+
+    def test_bridge_error_is_logged_not_silent(self):
+        lines = self.capture()
+        mod = fake_ingest([LIVE, b"[1]"])  # a non-object message makes the fake loop raise
+        phones = sb.install(mod, "R1", False, 15)
+        with self.assertRaises(Exception):
+            mod.Bridge().ws_loop(FakeSock())
+        self.assertEqual(phones.conns, {})
+        self.assertTrue(any(ln.startswith("R1 closed: bridge error in ws_ingest: AttributeError")
+                            for ln in lines), lines)
+
+    def test_udp_send_error_drops_the_message_not_the_phone(self):
+        lines = self.capture()
+        mod = fake_ingest([LIVE, LIVE, LIVE])
+        calls = []
+
+        def emit(self, node_id, pose, contacts, width, height, hfov_deg):
+            calls.append(pose)
+            raise OSError(55, "No buffer space available")
+        mod.Bridge.emit = emit
+        phones = sb.install(mod, "R1", False, 15)
+        mod.Bridge().ws_loop(FakeSock())
+        self.assertEqual(len(calls), 3)  # every message tried, the loop went on
+        self.assertEqual(sum("not sent to hud_fusion" in ln for ln in lines), 1)  # rate-limited
+        self.assertEqual(phones.conns, {})
+        self.assertTrue(any("R1 closed: the phone closed the WebSocket" in ln for ln in lines))
+
+    def test_failed_ping_closes_with_a_reason(self):
+        class DeadSock(FakeSock):
+            def sendall(self, b):
+                raise BrokenPipeError(32, "Broken pipe")
+        phones = sb.Phones("R1", True, 15)
+        link = sb.Link(DeadSock(), phones, 0)
+        phones.text(link, b'{"node_id":"R2"}')
+        with self.assertRaises(sb.LinkClosed) as cm:
+            phones.maybe_ping(link)
+        self.assertIn("send to the phone failed: broken pipe", str(cm.exception))
+
+    def test_drain_never_targets_r2(self):
+        phones = sb.Phones("R1", True, 15)
+        c = FakeSock()
+        phones.text(c, b'{"node_id":"R2"}')
+        for _ in range(6):
+            phones.pong(c, sb.PING_MAGIC + struct.pack(">d", time.monotonic() - 0.9))
+        phones.maybe_ping(c)
+        self.assertNotIn(b"video_ctrl", c.out)
+        self.assertIsNone(phones.conns[c]["paused_t"])
+
+    def test_two_phones_warning_only_when_both_talk(self):
+        lines = self.capture()
+        phones = sb.Phones("R1", False, 15)
+        old, new = FakeSock(), FakeSock()
+        phones.text(old, b'{"node_id":"R2"}')
+        phones.conns[old]["t0"] -= 10
+        phones.conns[old]["rx_t"] -= 2  # last data before the reconnect: a dead link
+        phones.text(new, b'{"node_id":"R2"}')
+        phones.status(10)
+        self.assertFalse(any("two live connections" in ln for ln in lines), lines)
+        phones.conns[new]["t0"] -= 2
+        phones.rx(old)  # still talking after the newer one connected: a second phone
+        phones.status(10)
+        self.assertEqual(sum("two live connections say they are R2" in ln for ln in lines), 1)
+
+    def test_pin_parse(self):
+        self.assertEqual(sb.parse_pin("R2=0,2,180"), ("R2", {"x_m": 0.0, "y_m": 2.0,
+                                                             "yaw_deg": 180.0}))
+        for bad in ("R2", "R2=1,2", "=1,2,3", "R2=a,b,c"):
+            with self.assertRaises(ValueError):
+                sb.parse_pin(bad)
+        self.assertEqual(sb.main(["--pin", "R2=1,2", "--ws-ingest", __file__]), 2)
 
 
 if __name__ == "__main__":

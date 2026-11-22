@@ -3,12 +3,12 @@
 
   python3 scripts/seeker_bridge.py [--ws-ingest PATH] [--no-video-ctrl] [--video-fps N]
                                    [--status-s S] [--keep-ingest-pose] [--no-ping] [--no-drain]
-                                   [ws_ingest.py flags...]
+                                   [--idle-s S] [--pin NODE=x,y,yaw]... [ws_ingest.py flags...]
 
   e.g. python3 scripts/seeker_bridge.py --ws-ingest ~/seeker/remote/ws_ingest.py \\
-           --port 8080 --tls-cert ~/cert.pem --tls-key ~/key.pem --view-node R1
+           --port 8080 --tls-cert ~/cert.pem --tls-key ~/key.pem --view-node R1 --pin R2=0,2,180
 
-Every flag that is not one of the seven above goes to ws_ingest.py as is (--port, --tls-cert,
+Every flag that is not one of the nine above goes to ws_ingest.py as is (--port, --tls-cert,
 --tls-key, --view-node, --video-host, --video-port, --fusion, ...).
 
 1. video_ctrl: when the view node's page connects, the bridge sends it
@@ -37,6 +37,22 @@ Every flag that is not one of the seven above goes to ws_ingest.py as is (--port
    bridge forwards what the phone sent in that message (null stays null); hud_fusion still
    holds the last pose and the HUD says POSE HELD. Logged once per change ("pose R1: null ...").
    --keep-ingest-pose turns this off.
+7. Link liveness and close reasons: ws_ingest.py reads with no timeout and the pings above only
+   go out after the phone sends something, so when a phone vanished without a FIN or RST
+   reaching the Pi (hotspot drop, phone locked) its socket stayed open forever and nothing was
+   logged; the phone then reconnected next to it. Now a quiet link is pinged every second from
+   its own reader thread (Safari answers in its network stack), a link with no data at all for
+   --idle-s (15 s; hotspot RTT spikes are under 1 s) is closed, a new connection from the same
+   node replaces an old one that has gone silent, a failed or stalled write closes the link
+   (a half-written frame would corrupt the stream), and every close logs one line:
+   "R2 closed: <reason> (up N s, ...)". A failed UDP send to hud_fusion drops that message,
+   not the phone.
+8. Pins (--pin NODE=x,y,yaw, same format as hud_fusion --pose): every message from NODE goes
+   to hud_fusion with that pose, whatever the phone sends (null after a reconnect whose URL
+   lost &pose=, or another pose). run-live.sh passes its PINS here as well as to hud_fusion.
+9. Stray video: a phone other than the view node that sends video is asked to stop
+   (video_ctrl stream_video false, again every OTHER_VIDEO_S while it keeps sending), so it
+   does not spend the hotspot uplink on frames the bridge drops. Off with --no-video-ctrl.
 
 If ws_ingest.py lacks the hooks this needs (ws_recv, VideoForwarder, Bridge.emit, main), it
 runs without that part, with a warning.
@@ -47,6 +63,7 @@ import json
 import os
 import select
 import socket
+import ssl
 import struct
 import sys
 import threading
@@ -60,6 +77,10 @@ DRAIN_RTT_MS = 400.0
 RESUME_RTT_MS = 150.0
 DRAIN_MAX_S = 2.5
 DRAIN_GAP_S = 15.0
+IDLE_S = 15.0
+REPLACE_QUIET_S = 3.0  # an old link this quiet is a dead one; two talking links are two phones
+OTHER_VIDEO_S = 5.0
+EMIT_WARN_S = 10.0
 
 
 def log(*a):
@@ -96,6 +117,98 @@ def ws_text_frame(text):
     else:
         head = bytes([0x81, 127]) + struct.pack(">Q", n)
     return head + data
+
+
+def parse_pin(s):
+    """'R2=0,2,180' -> ('R2', {"x_m": 0.0, "y_m": 2.0, "yaw_deg": 180.0}); ValueError if bad."""
+    node, sep, v = s.partition("=")
+    xs = [float(x) for x in v.split(",")] if sep else []
+    if not node or len(xs) != 3:
+        raise ValueError("--pin %s: want NODE=x_m,y_m,yaw_deg" % s)
+    return node, {"x_m": xs[0], "y_m": xs[1], "yaw_deg": xs[2]}
+
+
+class LinkClosed(Exception):
+    """Ends one phone connection; the message is the reason that gets logged. Not an OSError,
+    so the per-send `except OSError` paths cannot swallow it."""
+
+
+def close_reason(e):
+    if isinstance(e, LinkClosed):
+        return str(e)
+    if isinstance(e, ssl.SSLError):
+        return "TLS error: %s" % e
+    if isinstance(e, socket.timeout):
+        return "socket timed out: %s" % e
+    if isinstance(e, ConnectionResetError):
+        return "connection reset (ECONNRESET): the phone or the hotspot dropped the link"
+    if isinstance(e, BrokenPipeError):
+        return "broken pipe (EPIPE): the phone had already closed the link"
+    if type(e) is ConnectionError:
+        return ("the phone closed the TCP connection without a WebSocket close frame (page "
+                "reloaded, tab killed, or the phone left Wi-Fi)")
+    if isinstance(e, OSError):
+        return "socket error: %s" % e
+    return "bridge error in ws_ingest: %s: %s" % (type(e).__name__, e)
+
+
+class Link:
+    """What ws_ingest's ws_loop gets instead of the phone's socket (same recv and sendall), so
+    every read and write of a phone connection goes through the bridge on that connection's
+    own reader thread. While no byte arrives, recv wakes once a second (Phones.quiet: ping,
+    replaced by a newer connection, idle_s reached); the socket timeout is a backstop for a
+    read or write stuck inside one call. Write errors raise LinkClosed instead of being
+    ignored."""
+
+    TICK_S = 1.0
+
+    def __init__(self, sock, phones, idle_s):
+        self.sock, self.phones, self.idle_s = sock, phones, idle_s
+        self.rx_t = time.monotonic()
+        if idle_s > 0:
+            try:
+                sock.settimeout(idle_s)
+            except (AttributeError, OSError):
+                pass
+
+    def __getattr__(self, name):
+        return getattr(self.sock, name)
+
+    def recv(self, n):
+        while True:
+            pending = getattr(self.sock, "pending", None)
+            if pending is not None and pending():
+                break  # TLS already holds decrypted bytes; select would not see them
+            try:
+                if select.select([self.sock], [], [], self.TICK_S)[0]:
+                    break
+            except (OSError, ValueError) as e:
+                raise LinkClosed("socket error while waiting for data: %s" % e)
+            self.phones.quiet(self)
+        try:
+            d = self.sock.recv(n)
+        except socket.timeout:
+            raise LinkClosed("read stalled for %.0f s in the middle of a frame" % self.idle_s)
+        self.rx_t = time.monotonic()
+        return d
+
+    def sendall(self, b):
+        try:
+            self.sock.sendall(b)
+        except socket.timeout:
+            raise LinkClosed("send to the phone stalled for %.0f s (its receive window stayed "
+                             "full)" % self.idle_s)
+        except OSError as e:
+            raise LinkClosed("send to the phone failed: %s" % close_reason(e))
+
+
+def peer_str(c):
+    try:
+        p = c.getpeername()
+    except (AttributeError, OSError):
+        return None
+    host = p[0][7:] if str(p[0]).startswith("::ffff:") else p[0]
+    return "%s:%d" % (host, p[1])
 
 
 class SeekerVideoForwarder:
@@ -220,22 +333,43 @@ class Phones:
         self.fps = fps
         self.fwd = forwarder
         self.lock = threading.Lock()
-        self.conns = {}  # id(sock) -> dict
+        # Keyed by the connection object, not id(): an id can be reused by the next socket.
+        self.conns = {}
         self.tls = threading.local()  # .pose: (phone message had "pose", its value), per thread
         self.pass_null = False  # install() set Bridge.emit to forward pose null
         self.ping = True
         self.drain = True
+        self.idle_s = IDLE_S
+        self.pins = {}  # node -> pose dict (--pin)
+        self.emit_warn_t = {}
 
     def _st(self, c):
-        k = id(c)
-        st = self.conns.get(k)
+        st = self.conns.get(c)
         if st is None:
-            st = {"node": None, "t0": time.monotonic(), "msgs": 0, "frames": 0, "frames_t": 0,
-                  "fps": 0.0, "ctrl_t": None, "warned": False, "other_warned": False,
-                  "pose": None, "pose_live": None, "pose_t": None, "ping_t": 0.0, "rtt": [],
-                  "rtt_recent": [], "paused_t": None, "drain_t": -1e9, "drains": 0}
-            self.conns[k] = st
+            now = time.monotonic()
+            st = {"node": None, "t0": now, "rx_t": now, "peer": peer_str(c), "msgs": 0,
+                  "frames": 0, "frames_t": 0, "fps": 0.0, "ctrl_t": None, "warned": False,
+                  "other_warned": False, "stop_t": None, "stops": 0, "pose": None,
+                  "pose_live": None, "pose_t": None, "pin_logged": False, "dup_warned": False,
+                  "ping_t": 0.0, "rtt": [], "rtt_recent": [], "paused_t": None,
+                  "drain_t": -1e9, "drains": 0}
+            self.conns[c] = st
         return st
+
+    def opened(self, c):
+        with self.lock:
+            self._st(c)
+
+    def rx(self, c):
+        with self.lock:
+            self._st(c)["rx_t"] = time.monotonic()
+
+    def _newer(self, c, st):
+        """Under self.lock: the state of a newer connection that says it is the same node."""
+        for oc, ost in self.conns.items():
+            if oc is not c and st["node"] and ost["node"] == st["node"] and ost["t0"] > st["t0"]:
+                return ost
+        return None
 
     def text(self, c, data):
         self.tls.pose = (False, None)
@@ -253,11 +387,19 @@ class Phones:
             node = m.get("node_id")
             if node and node != st["node"]:
                 st["node"] = node
-                log("phone %s connected%s" % (node, " (view node: its video goes to the HUD)"
-                                              if node == self.view_node else ""))
+                log("phone %s connected%s%s" % (
+                    node, " from " + st["peer"] if st["peer"] else "",
+                    " (view node: its video goes to the HUD)" if node == self.view_node else ""))
             if "contacts" in m or "bearing_deg" in m:
                 st["msgs"] += 1
-            if "pose" in m and st["node"]:
+            if "pose" in m and st["node"] in self.pins:
+                if not st["pin_logged"]:
+                    st["pin_logged"] = True
+                    sent = self.tls.pose[1]
+                    log("pose %s: pinned on the Pi at %s (--pin); the phone sent %s, ignored"
+                        % (st["node"], pose_str(self.pins[st["node"]]),
+                           "null" if sent is None else pose_str(sent)))
+            elif "pose" in m and st["node"]:
                 self._pose(st, self.tls.pose[1])
             if (self.video_ctrl and st["node"] == self.view_node and st["ctrl_t"] is None):
                 st["ctrl_t"] = time.monotonic()
@@ -287,16 +429,29 @@ class Phones:
         st["pose_live"] = live
 
     def binary(self, c):
+        stop = False
         with self.lock:
             st = self._st(c)
             st["frames"] += 1
             node = st["node"]
             if st["frames"] == 1:
                 log("video: first frame from %s" % (node or "an unnamed phone"))
+            now = time.monotonic()
+            if (node and node != self.view_node and self.video_ctrl and
+                    (st["stop_t"] is None or now - st["stop_t"] >= OTHER_VIDEO_S)):
+                st["stop_t"] = now
+                st["stops"] += 1
+                stop = True
             if node != self.view_node and not st["other_warned"]:
                 st["other_warned"] = True
-                log("video: %s sends video but only %s (--view-node) goes to the HUD; dropped"
-                    % (node, self.view_node))
+                log("video: %s sends video but only %s (--view-node) goes to the HUD; dropped%s"
+                    % (node, self.view_node, ", asking %s to stop (video_ctrl stream_video "
+                       "false)" % node if stop else ""))
+            elif stop and st["stops"] == 2:
+                log("video: %s still sends video after a stop request; asking again every %.0f s "
+                    "(its phone.html may ignore video_ctrl)" % (node, OTHER_VIDEO_S))
+        if stop:
+            self._video_ctrl(c, False)
 
     def _video_ctrl(self, c, on):
         msg = {"type": "video_ctrl", "v": 2, "stream_video": on, "fps": self.fps}
@@ -360,18 +515,49 @@ class Phones:
             self._video_ctrl(c, True)
             log("video: %s video resumed after a %.1f s drain (ws rtt %.0f ms)" % (self.view_node, act[1], rtt))
 
-    def closed(self, c):
+    def quiet(self, link):
+        """A second with no byte from this phone (its reader thread, inside Link.recv)."""
+        now = time.monotonic()
+        silent = now - link.rx_t
         with self.lock:
-            st = self.conns.pop(id(c), None)
-        if st and st["node"]:
-            log("phone %s disconnected after %.0f s (%d msgs, %d video frames)"
-                % (st["node"], time.monotonic() - st["t0"], st["msgs"], st["frames"]))
+            st = self.conns.get(link)
+            newer = self._newer(link, st) if st else None
+            node = st["node"] if st else None
+        if newer is not None and silent >= REPLACE_QUIET_S:
+            raise LinkClosed("replaced by a newer %s connection%s; this one had no data for %.0f s "
+                             "(half-open: the phone reconnected and this socket never closed)"
+                             % (node, " from " + newer["peer"] if newer["peer"] else "", silent))
+        if link.idle_s > 0 and silent >= link.idle_s:
+            raise LinkClosed("no data from the phone for %.0f s, pings unanswered (Wi-Fi or "
+                             "hotspot dropped, phone locked, or Safari in the background)"
+                             % link.idle_s)
+        self.maybe_ping(link)
+
+    def closed(self, c, reason="connection ended"):
+        """Logs one line per connection, whichever path ends it first; later calls do nothing."""
+        with self.lock:
+            st = self.conns.pop(c, None)
+        if st is None:
+            return
+        who = st["node"] or "an unnamed phone"
+        log("%s closed: %s (up %.0f s, %d msgs, %d video frames%s)"
+            % (who, reason, time.monotonic() - st["t0"], st["msgs"], st["frames"],
+               ", from " + st["peer"] if st["peer"] else ""))
+
+    def emit_failed(self, node, e):
+        now = time.monotonic()
+        with self.lock:
+            if now - self.emit_warn_t.get(node, -1e9) < EMIT_WARN_S:
+                return
+            self.emit_warn_t[node] = now
+        log("WARNING remote_contacts from %s not sent to hud_fusion (%s); that message is "
+            "dropped, the phone link stays up" % (node, e))
 
     def status(self, period):
         now = time.monotonic()
         lines = []
         with self.lock:
-            for st in self.conns.values():
+            for c, st in self.conns.items():
                 if not st["node"]:
                     continue
                 dt = now - (st["frames_t"] or st["t0"])
@@ -386,7 +572,21 @@ class Phones:
                 if st["drains"]:
                     line += ", %d uplink drain%s%s" % (st["drains"], "s" if st["drains"] > 1 else "",
                                                        " (video paused now)" if st["paused_t"] else "")
-                if st["pose_live"]:
+                twin = self._newer(c, st)
+                if (twin is not None and not st["dup_warned"] and st["rx_t"] > twin["t0"] + 1.0
+                        and now - st["rx_t"] < REPLACE_QUIET_S):
+                    st["dup_warned"] = True
+                    lines.append("WARNING two live connections say they are %s (%s and %s): two "
+                                 "phones with the same ?node=? Both kept"
+                                 % (st["node"], st["peer"], twin["peer"]))
+                if now - st["rx_t"] >= 2 * PING_S + 1:
+                    line += ", no data for %.0f s" % (now - st["rx_t"])
+                if st["stops"]:
+                    line += ", video stop asked %d time%s" % (st["stops"],
+                                                              "s" if st["stops"] > 1 else "")
+                if st["node"] in self.pins:
+                    line += ", pose pinned %s (on the Pi)" % pose_str(self.pins[st["node"]])
+                elif st["pose_live"]:
                     line += ", pose live %s" % pose_str(st["pose"])
                 elif st["pose"] is not None:
                     line += ", pose null %.0f s (held at %s)" % (now - st["pose_t"],
@@ -403,6 +603,8 @@ class Phones:
                             "WARNING %s is connected but sends no video. Reload its page with "
                             "&video=1; if that does not help, its phone.html is older than "
                             "24686f3 (no video capture)" % st["node"])
+                if st["peer"]:
+                    line += ", from " + st["peer"]
                 lines.append(line)
         if not lines:
             lines.append("no phones connected (open https://qnxpi-felix.local:%d/?node=...)"
@@ -428,26 +630,54 @@ def install(mod, view_node, video_ctrl, fps, port=8080, pass_null_pose=True):
     phones = Phones(view_node, video_ctrl, fps, port=port)
     phones.fwd_holder = fwd_holder
     bridge = getattr(mod, "Bridge", None)
-    if pass_null_pose and bridge is not None and hasattr(bridge, "emit"):
+    if bridge is not None and hasattr(bridge, "emit"):
         orig_emit = bridge.emit
 
         def emit(self, node_id, pose, *a, **k):
-            had, raw = getattr(phones.tls, "pose", (False, None))
-            return orig_emit(self, node_id, raw if had else pose, *a, **k)
+            pin = phones.pins.get(node_id)
+            if pin is not None:
+                pose = dict(pin)
+            elif phones.pass_null:
+                had, raw = getattr(phones.tls, "pose", (False, None))
+                pose = raw if had else pose
+            try:
+                return orig_emit(self, node_id, pose, *a, **k)
+            except OSError as e:
+                phones.emit_failed(node_id, e)
+                return None
 
         bridge.emit = emit
-        phones.pass_null = True
-    elif pass_null_pose:
+        phones.pass_null = pass_null_pose
+    else:
         log("WARNING ws_ingest has no Bridge.emit; pose null is not passed through (the HUD "
-            "cannot show POSE HELD)")
+            "cannot show POSE HELD) and --pin does nothing")
+    if bridge is not None and hasattr(bridge, "ws_loop"):
+        orig_loop = bridge.ws_loop
+
+        def ws_loop(self, c):
+            link = Link(c, phones, phones.idle_s)
+            phones.opened(link)
+            try:
+                return orig_loop(self, link)
+            except Exception as e:
+                phones.closed(link, close_reason(e))
+                raise  # ws_ingest's handle() closes the socket
+            finally:
+                phones.closed(link, "ws_ingest left its loop")
+
+        bridge.ws_loop = ws_loop
+    else:
+        log("WARNING ws_ingest has no Bridge.ws_loop; no idle timeout, a dead phone link stays "
+            "open")
     orig = mod.ws_recv
 
     def ws_recv(c):
         try:
             fin, op, data = orig(c)
-        except Exception:
-            phones.closed(c)
+        except Exception as e:
+            phones.closed(c, close_reason(e))
             raise
+        phones.rx(c)
         if op == WS_TEXT:
             phones.text(c, data)
         elif op == WS_BINARY:
@@ -455,7 +685,9 @@ def install(mod, view_node, video_ctrl, fps, port=8080, pass_null_pose=True):
         elif op == WS_PONG:
             phones.pong(c, data)
         elif op == WS_CLOSE:
-            phones.closed(c)
+            code = struct.unpack(">H", data[:2])[0] if len(data) >= 2 else None
+            phones.closed(c, "the phone closed the WebSocket (close frame%s)"
+                          % (", code %d" % code if code is not None else ""))
         if op != WS_CLOSE:
             phones.maybe_ping(c)
         return fin, op, data
@@ -481,7 +713,14 @@ def main(argv=None):
     ap.add_argument("--keep-ingest-pose", action="store_true")
     ap.add_argument("--no-ping", action="store_true")
     ap.add_argument("--no-drain", action="store_true")
+    ap.add_argument("--idle-s", type=float, default=IDLE_S)
+    ap.add_argument("--pin", action="append", default=[])
     ours, rest = ap.parse_known_args(argv)
+    try:
+        pins = dict(parse_pin(p) for p in ours.pin)
+    except ValueError as e:
+        log(str(e))
+        return 2
     theirs = argparse.ArgumentParser(add_help=False)
     theirs.add_argument("--view-node", default="R1")
     theirs.add_argument("--port", type=int, default=8080)
@@ -495,10 +734,14 @@ def main(argv=None):
     if phones is not None:
         phones.ping = not ours.no_ping
         phones.drain = not ours.no_drain
-    log("running %s %s (view node %s, video_ctrl %s, pose null %s)"
+        phones.idle_s = ours.idle_s
+        phones.pins = pins
+    log("running %s %s (view node %s, video_ctrl %s, pose null %s, idle close %s, pins %s)"
         % (ours.ws_ingest, " ".join(rest), targs.view_node,
            "off" if ours.no_video_ctrl else "on",
-           "as ws_ingest (last pose)" if ours.keep_ingest_pose else "passed to hud_fusion"))
+           "as ws_ingest (last pose)" if ours.keep_ingest_pose else "passed to hud_fusion",
+           "%.0f s" % ours.idle_s if ours.idle_s > 0 else "off",
+           " ".join("%s=%s" % (n, pose_str(p)) for n, p in sorted(pins.items())) or "none"))
     if phones is not None and ours.status_s > 0:
         def status_loop():
             while True:
